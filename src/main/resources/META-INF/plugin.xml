@@ -1,0 +1,29 @@
+<idea-plugin>
+    <id>com.enesreport</id>
+    <name>Enes Report</name>
+    <vendor>Enes</vendor>
+    <description><![CDATA[
+        Browse Cucumber (.feature) and Gauge (.spec/.cspec) scenarios in a unified tree view.
+        View steps, report results, run scenarios, and export HTML reports directly from the IDE.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Enes Report"
+                    anchor="right"
+                    secondary="false"
+                    icon="/icons/enesReport.svg"
+                    factoryClass="com.scenarioexplorer.ScenarioToolWindowFactory"/>
+
+        <fileEditorProvider implementation="com.scenarioexplorer.ui.ScenarioExplorerFileEditorProvider"/>
+
+        <projectConfigurable
+                parentId="tools"
+                instance="com.scenarioexplorer.settings.ScenarioExplorerConfigurable"
+                id="com.scenarioexplorer.settings"
+                displayName="Enes Report"/>
+
+        <projectService serviceImplementation="com.scenarioexplorer.settings.ScenarioExplorerSettings"/>
+    </extensions>
+</idea-plugin>
