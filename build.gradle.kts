@@ -44,6 +44,14 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.1.0</b><br>
+            <ul>
+                <li>Scrollable run history tabs with status indicators (color + icon)</li>
+                <li>Terminal area auto-hides when no runs are active</li>
+                <li>Fixed concurrent run class file conflicts — each run uses a fully isolated build directory</li>
+                <li>Improved error message panel minimum height in Errors tab</li>
+                <li>Cleaner toolbar — removed redundant labels and retry button</li>
+            </ul>
             <b>1.0.0</b><br>
             <ul>
                 <li>Cucumber (.feature) and Gauge (.spec/.cspec) scenario explorer</li>

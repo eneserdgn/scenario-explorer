@@ -41,15 +41,108 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
         detailPanel.showScenario(scenario, reports)
     }
     // Tabbed output area — each run gets its own tab
-    private val outputTabs = JTabbedPane(JTabbedPane.TOP).apply {
-        border = JBUI.Borders.empty()
+    private class ScrollableOutputTabs : JPanel(BorderLayout()) {
+        private data class Entry(val key: String, val header: TabHeader, val content: JComponent)
+        private val entries = mutableListOf<Entry>()
+
+        // Tab header — draws a 2px accent line at top when selected
+        private inner class TabHeader(val label: JBLabel, val stopBtn: JButton, val closeBtn: JButton) : JPanel() {
+            var selected = false
+            init {
+                layout = BoxLayout(this, BoxLayout.X_AXIS)
+                isOpaque = true
+                border = JBUI.Borders.empty(0, 8, 0, 6)
+                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                add(label); add(Box.createHorizontalStrut(5)); add(stopBtn); add(closeBtn)
+            }
+            override fun paintComponent(g: Graphics) {
+                super.paintComponent(g)
+                if (selected) {
+                    val g2 = g.create() as Graphics2D
+                    g2.color = UIConstants.BLUE
+                    g2.fillRect(0, 0, width, 2)
+                    g2.dispose()
+                }
+            }
+        }
+
+        private val tabBar = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            isOpaque = false
+        }
+        private val tabScroll = JBScrollPane(tabBar).apply {
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+            verticalScrollBarPolicy   = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+            horizontalScrollBar.preferredSize = Dimension(0, 0)  // hide scrollbar visually
+            border = BorderFactory.createMatteBorder(0, 0, 1, 0, UIConstants.subtleBorder())
+            isOpaque = false; viewport.isOpaque = false
+            val h = 28
+            minimumSize   = Dimension(0, h)
+            preferredSize = Dimension(Int.MAX_VALUE, h)
+            maximumSize   = Dimension(Int.MAX_VALUE, h)
+            val scroll = { e: java.awt.event.MouseWheelEvent ->
+                horizontalScrollBar.value += (e.wheelRotation * 40).toInt()
+            }
+            addMouseWheelListener(scroll)
+            tabBar.addMouseWheelListener(scroll)
+        }
+        private val contentArea = JPanel(CardLayout())
+        private var selectedKey: String? = null
+
+        init {
+            add(tabScroll, BorderLayout.NORTH)
+            add(contentArea, BorderLayout.CENTER)
+        }
+
+        fun addTab(label: JBLabel, stopBtn: JButton, closeBtn: JButton, content: JComponent): String {
+            val key = "tab${entries.size}"
+            label.font = label.font.deriveFont(Font.PLAIN, 11f)
+            stopBtn.preferredSize = Dimension(18, 18); stopBtn.maximumSize = Dimension(18, 18)
+            closeBtn.preferredSize = Dimension(18, 18); closeBtn.maximumSize = Dimension(18, 18)
+            val header = TabHeader(label, stopBtn, closeBtn).apply {
+                addMouseListener(object : java.awt.event.MouseAdapter() {
+                    override fun mouseClicked(e: java.awt.event.MouseEvent) = selectKey(key)
+                })
+                addMouseWheelListener { e -> tabScroll.horizontalScrollBar.value += (e.wheelRotation * 40).toInt() }
+            }
+            entries.add(Entry(key, header, content))
+            contentArea.add(content, key)
+            tabBar.add(header)
+            tabBar.revalidate(); tabBar.repaint()
+            selectKey(key)
+            return key
+        }
+
+        fun removeByContent(content: JComponent) {
+            val entry = entries.find { it.content === content } ?: return
+            val idx = entries.indexOf(entry)
+            entries.removeAt(idx)
+            tabBar.remove(entry.header)
+            contentArea.remove(entry.content)
+            tabBar.revalidate(); tabBar.repaint()
+            if (selectedKey == entry.key) {
+                val next = entries.getOrNull(idx) ?: entries.lastOrNull()
+                if (next != null) selectKey(next.key) else selectedKey = null
+            }
+            if (entries.isEmpty()) isVisible = false
+        }
+
+        private fun selectKey(key: String) {
+            selectedKey = key
+            (contentArea.layout as CardLayout).show(contentArea, key)
+            val bg = UIUtil.getPanelBackground()
+            val dimBg = Color((bg.red - 8).coerceAtLeast(0), (bg.green - 8).coerceAtLeast(0), (bg.blue - 8).coerceAtLeast(0))
+            entries.forEach { e ->
+                e.header.selected = e.key == key
+                e.header.background = if (e.key == key) bg else dimBg
+                e.header.label.font = e.header.label.font.deriveFont(if (e.key == key) Font.BOLD else Font.PLAIN)
+                e.header.repaint()
+            }
+        }
     }
 
-    private val reportPathLabel = JBLabel("Report: not set").apply {
-        foreground = UIUtil.getLabelDisabledForeground()
-        border = JBUI.Borders.emptyLeft(8)
-        font = font.deriveFont(11f)
-    }
+    private val outputTabs = ScrollableOutputTabs().apply { isVisible = false }
+
     private val summaryLabel = JBLabel().apply {
         border = JBUI.Borders.empty(6, 10)
         foreground = UIUtil.getLabelDisabledForeground()
@@ -78,19 +171,13 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                         onFinished = { exitCode ->
                             SwingUtilities.invokeLater {
                                 appendAnsi(tab.textPane, "\n--- Finished (exit code: $exitCode) ---\n")
-                                tab.markFinished()
+                                tab.markFinished(exitCode)
                                 refresh()
                             }
                         }
                     )?.let { handle -> tab.runHandle = handle }
                 }.start()
             }
-        }
-
-        val currentPath = ScenarioExplorerSettings.getInstance(project).state.reportPath
-        if (currentPath.isNotEmpty()) {
-            reportPathLabel.text = "Report: $currentPath"
-            reportPathLabel.foreground = UIUtil.getLabelForeground()
         }
 
         val toolbar = createToolbar()
@@ -159,42 +246,46 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             isFocusPainted = false
             preferredSize = Dimension(20, 20)
         }
+        var tabLabel: JBLabel? = null
 
         fun stop() {
             runHandle?.stop()
             appendAnsi(textPane, "\n--- Stopped by user ---\n")
             stopButton.isEnabled = false
+            tabLabel?.let {
+                it.text = "⏹ $title"
+                it.foreground = UIUtil.getLabelDisabledForeground()
+            }
         }
 
-        fun markFinished() {
+        fun markFinished(exitCode: Int = 0) {
             isFinished = true
             stopButton.isVisible = false
+            tabLabel?.let {
+                if (exitCode == 0) {
+                    it.text = "✓ $title"
+                    it.foreground = UIConstants.GREEN
+                } else {
+                    it.text = "✗ $title"
+                    it.foreground = UIConstants.RED
+                }
+            }
         }
     }
 
     private fun createOutputTab(title: String): OutputTab {
         val tab = OutputTab(title)
         val scroll = JBScrollPane(tab.textPane).apply { border = JBUI.Borders.empty(2) }
-        val time = SimpleDateFormat("HH:mm:ss").format(Date())
-        val tabTitle = "$title  $time"
 
-        outputTabs.addTab(tabTitle, scroll)
-        val idx = outputTabs.tabCount - 1
-        outputTabs.selectedIndex = idx
+        val tabLabel = JBLabel("▶ $title").apply { font = font.deriveFont(11f) }
+        tab.tabLabel = tabLabel
 
-        // Custom tab component with stop + close buttons
-        val tabComponent = JPanel(FlowLayout(FlowLayout.LEFT, 2, 0)).apply {
-            isOpaque = false
-            add(JBLabel(tabTitle).apply { font = font.deriveFont(11f) })
-            add(tab.stopButton)
-            add(tab.closeButton)
-        }
-        outputTabs.setTabComponentAt(idx, tabComponent)
+        outputTabs.isVisible = true
+        outputTabs.addTab(tabLabel, tab.stopButton, tab.closeButton, scroll)
 
         tab.closeButton.addActionListener {
             tab.stop()
-            val i = outputTabs.indexOfComponent(scroll)
-            if (i >= 0) outputTabs.removeTabAt(i)
+            outputTabs.removeByContent(scroll)
         }
 
         return tab
@@ -262,9 +353,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
         val runSelectedAction = object : AnAction("Run Selected", "Run all checked scenarios", AllIcons.Actions.Execute) {
             override fun actionPerformed(e: AnActionEvent) = runSelected()
         }
-        val retrySelectedAction = object : AnAction("Retry Selected", "Run checked scenarios with auto-retry", AllIcons.Actions.Rerun) {
-            override fun actionPerformed(e: AnActionEvent) = retrySelected()
-        }
         val setReportPathAction = object : AnAction("Set Report Path", "Choose report JSON folder", AllIcons.Actions.MenuOpen) {
             override fun actionPerformed(e: AnActionEvent) = chooseReportPath()
         }
@@ -275,7 +363,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
         val group = DefaultActionGroup().apply {
             add(refreshAction)
             add(runSelectedAction)
-            add(retrySelectedAction)
             addSeparator()
             add(setReportPathAction)
             add(setScanPathsAction)
@@ -285,7 +372,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
 
         return JPanel(BorderLayout()).apply {
             add(toolbar.component, BorderLayout.WEST)
-            add(reportPathLabel, BorderLayout.CENTER)
         }
     }
 
@@ -298,8 +384,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
         val path = chosen.path
         val settings = ScenarioExplorerSettings.getInstance(project)
         settings.loadState(settings.state.copy(reportPath = path))
-        reportPathLabel.text = "Report: $path"
-        reportPathLabel.foreground = UIUtil.getLabelForeground()
         refresh()
     }
 
@@ -708,7 +792,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                         onFinished = { exitCode ->
                             SwingUtilities.invokeLater {
                                 appendAnsi(tab.textPane, "\n--- Finished (exit code: $exitCode) ---\n")
-                                tab.markFinished()
+                                tab.markFinished(exitCode)
                                 refresh()
                             }
                         }
@@ -727,7 +811,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                         onFinished = { exitCode ->
                             SwingUtilities.invokeLater {
                                 appendAnsi(tab.textPane, "\n--- Batch finished (exit code: $exitCode) ---\n")
-                                tab.markFinished()
+                                tab.markFinished(exitCode)
                                 refresh()
                             }
                         }
@@ -850,8 +934,8 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                     val cmd = com.intellij.execution.configurations.GeneralCommandLine().apply {
                         workDirectory = java.io.File(basePath)
                         exePath = mvnExe
-                        addParameters("clean", "compile", "test-compile")
-                        addParameter("-Dmaven.build.dir=${sharedTarget.absolutePath}")
+                        addParameters("compile", "test-compile")
+                        addParameters(ScenarioRunner.isolatedBuildParams(sharedTarget))
                     }
                     try {
                         val handler = com.intellij.execution.process.OSProcessHandler(cmd)
@@ -965,7 +1049,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             }
 
             SwingUtilities.invokeLater {
-                tab.markFinished()
+                tab.markFinished(if (currentScenarios.isEmpty()) 0 else 1)
                 retryRunning = false
             }
         }.start()

@@ -172,7 +172,7 @@ class ErrorsPanel : JPanel(BorderLayout()) {
         // ── Hata mesajı kartı ───────────────────────────────────────
         // Satır sayısına göre yükseklik — boşluk kalmaz
         val lineCount = group.summary.lines().size
-        val cardHeight = lineCount * 18 + 24
+        val cardHeight = maxOf(lineCount * 18 + 24, 100)
 
         val errorText = JTextArea(group.summary).apply {
             isEditable = false

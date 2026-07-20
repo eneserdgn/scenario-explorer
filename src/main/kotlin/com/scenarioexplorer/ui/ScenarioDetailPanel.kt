@@ -13,6 +13,8 @@ import com.intellij.util.ui.UIUtil
 import com.scenarioexplorer.model.*
 import com.scenarioexplorer.runner.ScenarioRunner
 import java.awt.*
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.util.Base64
 import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
@@ -42,9 +44,93 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
     }
 
-    private val reportTabs = JTabbedPane(JTabbedPane.TOP).apply {
-        border = JBUI.Borders.empty()
+    private inner class ScrollableTabsPanel : JPanel(BorderLayout()) {
+        private val tabBar = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            isOpaque = false
+        }
+        private val tabBarScroll = JScrollPane(tabBar).apply {
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy   = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+            border = BorderFactory.createMatteBorder(0, 0, 1, 0, UIConstants.subtleBorder())
+            isOpaque = false; viewport.isOpaque = false
+            val h = 32
+            minimumSize   = Dimension(0, h)
+            preferredSize = Dimension(Int.MAX_VALUE, h)
+            maximumSize   = Dimension(Int.MAX_VALUE, h)
+            tabBar.addMouseWheelListener { e ->
+                horizontalScrollBar.value += (e.wheelRotation * 40).toInt()
+            }
+        }
+        private val tabContent = JPanel(CardLayout())
+        private val tabButtons = mutableListOf<JPanel>()
+        private var selectedIdx = -1
+
+        init {
+            add(tabBarScroll, BorderLayout.NORTH)
+            add(tabContent,   BorderLayout.CENTER)
+        }
+
+        fun addTab(title: String, color: Color, tooltip: String, content: JComponent) {
+            val idx = tabButtons.size
+            tabContent.add(content, "tab$idx")
+
+            val label = JBLabel(title).apply { foreground = color; font = font.deriveFont(13f) }
+            val btn = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.X_AXIS)
+                isOpaque = true
+                border = unselectedBorder()
+                toolTipText = tooltip
+                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                add(Box.createHorizontalStrut(10))
+                add(label)
+                add(Box.createHorizontalStrut(10))
+                addMouseListener(object : MouseAdapter() {
+                    override fun mouseClicked(e: MouseEvent) = selectTab(idx)
+                })
+                addMouseWheelListener { e ->
+                    tabBarScroll.horizontalScrollBar.value += (e.wheelRotation * 40).toInt()
+                }
+            }
+            tabButtons.add(btn)
+            tabBar.add(btn)
+            if (selectedIdx == -1) selectTab(0)
+        }
+
+        fun selectTab(idx: Int) {
+            selectedIdx = idx
+            (tabContent.layout as CardLayout).show(tabContent, "tab$idx")
+            tabButtons.forEachIndexed { i, btn ->
+                val selected = i == idx
+                btn.background = if (selected) UIUtil.getPanelBackground()
+                    else UIUtil.getPanelBackground().let {
+                        Color((it.red - 5).coerceAtLeast(0), (it.green - 5).coerceAtLeast(0), (it.blue - 5).coerceAtLeast(0))
+                    }
+                btn.border = if (selected) selectedBorder() else unselectedBorder()
+                (btn.getComponent(1) as JBLabel).font =
+                    (btn.getComponent(1) as JBLabel).font.deriveFont(if (selected) Font.BOLD else Font.PLAIN, 13f)
+                btn.repaint()
+            }
+        }
+
+        private fun selectedBorder() = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(1, 1, 0, 1, UIUtil.getLabelForeground().let {
+                Color(it.red, it.green, it.blue, 120)
+            }),
+            JBUI.Borders.empty(4, 6)
+        )
+
+        private fun unselectedBorder() = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 0, 0, Color(0, 0, 0, 0)),
+            JBUI.Borders.empty(5, 7)
+        )
+
+        override fun removeAll() {
+            tabBar.removeAll(); tabContent.removeAll(); tabButtons.clear(); selectedIdx = -1
+        }
     }
+
+    private val reportTabs = ScrollableTabsPanel()
 
     private val contentPanel = JPanel(CardLayout()).apply {
         add(JBScrollPane(stepsPanel).apply { border = JBUI.Borders.empty(4) }, "steps")
@@ -168,32 +254,18 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
 
         if (currentReports.isNotEmpty()) {
             reportTabs.removeAll()
-            for ((index, report) in currentReports.withIndex()) {
+            for (report in currentReports) {
                 val tabPanel = buildReportPanel(scenario, report)
                 val tabTitle = report.timestamp ?: "Report"
                 val statusIcon = when (report.status) {
-                    StepStatus.PASSED -> "✓"
-                    StepStatus.FAILED -> "✗"
-                    StepStatus.SKIPPED -> "⊘"
-                    else -> "?"
+                    StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"
+                    StepStatus.SKIPPED -> "⊘"; else -> "?"
                 }
-                val displayTitle = "$statusIcon $tabTitle"
-                reportTabs.addTab(displayTitle, tabPanel)
-
-                val tabIndex = reportTabs.tabCount - 1
-                reportTabs.setToolTipTextAt(tabIndex, report.sourceFile ?: "Unknown source")
-
                 val tabColor = when (report.status) {
-                    StepStatus.PASSED -> UIConstants.GREEN
-                    StepStatus.FAILED -> UIConstants.RED
-                    StepStatus.SKIPPED -> UIConstants.YELLOW
-                    else -> UIUtil.getLabelForeground()
+                    StepStatus.PASSED -> UIConstants.GREEN; StepStatus.FAILED -> UIConstants.RED
+                    StepStatus.SKIPPED -> UIConstants.YELLOW; else -> UIUtil.getLabelForeground()
                 }
-                val tabLabel = JBLabel(displayTitle).apply {
-                    foreground = tabColor
-                    font = if (index == 0) font.deriveFont(Font.BOLD) else font
-                }
-                reportTabs.setTabComponentAt(tabIndex, tabLabel)
+                reportTabs.addTab("$statusIcon $tabTitle", tabColor, report.sourceFile ?: "", tabPanel)
             }
             cl.show(contentPanel, "reports")
         } else {
@@ -468,7 +540,9 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
             }
 
             add(JBScrollPane(textArea).apply {
-                preferredSize = Dimension(500, textArea.rows * 16 + 12)
+                val calcH = textArea.rows * 16 + 12
+                preferredSize = Dimension(500, calcH)
+                minimumSize   = Dimension(0, 100)
                 border = JBUI.Borders.empty()
                 isOpaque = false
                 viewport.isOpaque = false

@@ -105,18 +105,18 @@ object ScenarioRunner {
         if (scenarioNames.isNotEmpty()) {
             val isShared = sharedTargetDir != null
             val targetDir = sharedTargetDir ?: createIsolatedTargetDir(basePath, "batch")
-            // Shared target: skip clean, only test (compile already done or will be done by first run)
+            // Shared target: compile already done by pipeline; only run test phase
             val mvnGoals = if (isShared) {
                 listOf("test")
             } else {
-                if (settings.buildBeforeRun) listOf("clean", "compile", "test-compile", "test") else listOf("test")
+                if (settings.buildBeforeRun) listOf("compile", "test-compile", "test") else listOf("test")
             }
             val commandLine = GeneralCommandLine().apply {
                 workDirectory = java.io.File(basePath)
                 exePath = resolveMvnExecutable(basePath)
                 addParameters(mvnGoals)
+                addParameters(isolatedBuildParams(targetDir))
                 addParameters(
-                    "-Dmaven.build.dir=${targetDir.absolutePath}",
                     "-Dcucumber.filter.tags=",
                     "-Dcucumber.filter.name=$scenarioNames",
                     "-Dcucumber.features=$featureFiles",
@@ -214,13 +214,13 @@ object ScenarioRunner {
         basePath: String, scenario: Scenario, reportName: String, buildBeforeRun: Boolean, tempTarget: java.io.File, reportDir: String
     ): GeneralCommandLine {
         val relativePath = scenario.file.relativeTo(java.io.File(basePath)).path
-        val mvnGoals = if (buildBeforeRun) listOf("clean", "compile", "test-compile", "test") else listOf("test")
+        val mvnGoals = if (buildBeforeRun) listOf("compile", "test-compile", "test") else listOf("test")
         return GeneralCommandLine().apply {
             workDirectory = java.io.File(basePath)
             exePath = resolveMvnExecutable(basePath)
             addParameters(mvnGoals)
+            addParameters(isolatedBuildParams(tempTarget))
             addParameters(
-                "-Dmaven.build.dir=${tempTarget.absolutePath}",
                 "-Dcucumber.filter.tags=",
                 "-Dcucumber.filter.name=${escapeRegex(scenario.name)}",
                 "-Dcucumber.features=$relativePath",
@@ -245,6 +245,13 @@ object ScenarioRunner {
         }
     }
 
+    /** Returns the three Maven properties that fully isolate a build into [dir]. */
+    fun isolatedBuildParams(dir: java.io.File): List<String> = listOf(
+        "-Dproject.build.directory=${dir.absolutePath}",
+        "-Dproject.build.outputDirectory=${dir.absolutePath}/classes",
+        "-Dproject.build.testOutputDirectory=${dir.absolutePath}/test-classes"
+    )
+
     private fun buildPluginParam(reportName: String, reportDir: String): String {
         return "-Dcucumber.plugin=" + listOf(
             "pretty",
@@ -256,15 +263,13 @@ object ScenarioRunner {
         val relativePath = scenario.file.relativeTo(java.io.File(basePath)).path
         val specsDir = "$relativePath:${scenario.line}"
         val gaugeTarget = createIsolatedTargetDir(basePath, "gauge")
-        val mvnGoals = mutableListOf<String>()
-        if (buildBeforeRun) mvnGoals.add("clean")
-        mvnGoals.addAll(listOf("compile", "test-compile", "gauge:execute"))
+        val mvnGoals = if (buildBeforeRun) listOf("compile", "test-compile", "gauge:execute") else listOf("gauge:execute")
         return GeneralCommandLine().apply {
             workDirectory = java.io.File(basePath)
             exePath = resolveMvnExecutable(basePath)
             addParameters(mvnGoals)
             addParameter("-DspecsDir=$specsDir")
-            addParameter("-Dmaven.build.dir=${gaugeTarget.absolutePath}")
+            addParameters(isolatedBuildParams(gaugeTarget))
         }
     }
 
