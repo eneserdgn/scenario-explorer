@@ -16,8 +16,7 @@ object HtmlExporter {
         val total = allScenarios.size
         val passed = allScenarios.count { latestReports[it.name]?.status == StepStatus.PASSED }
         val failed = allScenarios.count { latestReports[it.name]?.status == StepStatus.FAILED }
-        val skipped = allScenarios.count { latestReports[it.name]?.status == StepStatus.SKIPPED }
-        val notRun = total - passed - failed - skipped
+        val notRun = total - passed - failed
         val totalDur = allScenarios.sumOf { latestReports[it.name]?.duration ?: 0L }
         val ran = total - notRun
         val passRate = if (ran > 0) passed * 100.0 / ran else 0.0
@@ -43,7 +42,7 @@ object HtmlExporter {
 
         // ===== PAGE 1: DASHBOARD =====
         sb.appendLine("<div id=\"dashboard\" class=\"page active\">")
-        buildDashboard(sb, total, passed, failed, skipped, notRun, totalDur, passRate, ran, files, allScenarios, latestReports)
+        buildDashboard(sb, total, passed, failed, notRun, totalDur, passRate, ran, files, allScenarios, latestReports)
         sb.appendLine("</div>")
 
         // ===== PAGE 2: SCENARIOS =====
@@ -59,7 +58,7 @@ object HtmlExporter {
     }
 
     private fun buildDashboard(
-        sb: StringBuilder, total: Int, passed: Int, failed: Int, skipped: Int, notRun: Int,
+        sb: StringBuilder, total: Int, passed: Int, failed: Int, notRun: Int,
         totalDur: Long, passRate: Double, ran: Int,
         files: List<ScenarioFile>, allScenarios: List<Scenario>, reports: Map<String, ReportEntry>
     ) {
@@ -68,7 +67,6 @@ object HtmlExporter {
         sb.appendLine(card("Toplam", "$total", "blue"))
         sb.appendLine(card("Passed", "$passed", "green"))
         sb.appendLine(card("Failed", "$failed", "red"))
-        sb.appendLine(card("Skipped", "$skipped", "yellow"))
         sb.appendLine(card("Not Run", "$notRun", "gray"))
         sb.appendLine(card("Süre", fmtDur(totalDur), "blue"))
         sb.appendLine("</div>")
@@ -84,15 +82,14 @@ object HtmlExporter {
 
         // Feature table
         sb.appendLine("<div class=\"section\"><h2>Feature Bazlı Dağılım</h2>")
-        sb.appendLine("<table><thead><tr><th>Feature</th><th>Toplam</th><th>✓</th><th>✗</th><th>⊘</th><th>Oran</th><th>Süre</th></tr></thead><tbody>")
+        sb.appendLine("<table><thead><tr><th>Feature</th><th>Toplam</th><th>✓</th><th>✗</th><th>Oran</th><th>Süre</th></tr></thead><tbody>")
         for (sf in files) {
             val sc = sf.scenarios; val t = sc.size
             val p = sc.count { reports[it.name]?.status == StepStatus.PASSED }
             val f = sc.count { reports[it.name]?.status == StepStatus.FAILED }
-            val sk = sc.count { reports[it.name]?.status == StepStatus.SKIPPED }
             val d = sc.sumOf { reports[it.name]?.duration ?: 0L }
             val rate = if (p + f > 0) "%.0f%%".format(p * 100.0 / (p + f)) else "-"
-            sb.appendLine("<tr><td>${esc(sf.featureName)}</td><td>$t</td><td class=\"g\">$p</td><td class=\"r\">$f</td><td class=\"y\">$sk</td><td>$rate</td><td class=\"dim\">${fmtDur(d)}</td></tr>")
+            sb.appendLine("<tr><td>${esc(sf.featureName)}</td><td>$t</td><td class=\"g\">$p</td><td class=\"r\">$f</td><td>$rate</td><td class=\"dim\">${fmtDur(d)}</td></tr>")
         }
         sb.appendLine("</tbody></table></div>")
 
@@ -266,13 +263,13 @@ object HtmlExporter {
     // --- Helpers ---
     private fun card(label: String, value: String, color: String) =
         "<div class=\"card $color\"><div class=\"cv\">$value</div><div class=\"cl\">$label</div></div>"
-    private fun statusIcon(s: StepStatus) = when (s) { StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"; StepStatus.SKIPPED -> "⊘"; else -> "○" }
+    private fun statusIcon(s: StepStatus) = when (s) { StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"; else -> "○" }
     private fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
     private fun fmt(d: Double) = String.format(Locale.US, "%.1f", d)
     private fun fmtDur(ms: Long): String {
         if (ms == 0L) return "-"
         val h = ms / 3_600_000; val m = (ms % 3_600_000) / 60_000; val s = (ms % 60_000) / 1000
-        return if (h > 0) "%02dh %02dm %02ds".format(h, m, s) else "%02dm %02ds".format(m, s)
+        return "%02dh %02dm %02ds".format(h, m, s)
     }
     private fun fmtMs(ms: Long) = when { ms < 1000 -> "${ms}ms"; ms < 60_000 -> "%.1fs".format(ms / 1000.0); else -> "%dm %ds".format(ms / 60_000, (ms % 60_000) / 1000) }
 

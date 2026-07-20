@@ -223,8 +223,7 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
             when (it.status) {
                 StepStatus.PASSED -> 0
                 StepStatus.FAILED -> 1
-                StepStatus.SKIPPED -> 2
-                else -> 3
+                else -> 2
             }
         })
         currentReports = sorted
@@ -234,7 +233,6 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
             sorted.isNotEmpty() -> when (sorted.first().status) {
                 StepStatus.PASSED -> "✅"
                 StepStatus.FAILED -> "❌"
-                StepStatus.SKIPPED -> "⏭"
                 else -> "⬜"
             }
             else -> ""
@@ -258,12 +256,11 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
                 val tabPanel = buildReportPanel(scenario, report)
                 val tabTitle = report.timestamp ?: "Report"
                 val statusIcon = when (report.status) {
-                    StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"
-                    StepStatus.SKIPPED -> "⊘"; else -> "?"
+                    StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"; else -> "?"
                 }
                 val tabColor = when (report.status) {
                     StepStatus.PASSED -> UIConstants.GREEN; StepStatus.FAILED -> UIConstants.RED
-                    StepStatus.SKIPPED -> UIConstants.YELLOW; else -> UIUtil.getLabelForeground()
+                    else -> UIUtil.getLabelForeground()
                 }
                 reportTabs.addTab("$statusIcon $tabTitle", tabColor, report.sourceFile ?: "", tabPanel)
             }
@@ -433,7 +430,6 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
         val statusColor = when (step.status) {
             StepStatus.PASSED -> UIConstants.GREEN
             StepStatus.FAILED -> UIConstants.RED
-            StepStatus.SKIPPED -> UIConstants.YELLOW
             else -> UIConstants.GRAY
         }
 
@@ -456,7 +452,6 @@ class ScenarioDetailPanel(private val project: Project) : JPanel(BorderLayout())
                 when (step.status) {
                     StepStatus.PASSED -> AllIcons.RunConfigurations.TestPassed
                     StepStatus.FAILED -> AllIcons.RunConfigurations.TestFailed
-                    StepStatus.SKIPPED -> AllIcons.RunConfigurations.TestSkipped
                     StepStatus.NOT_RUN -> AllIcons.Actions.Suspend
                     else -> AllIcons.Actions.Suspend
                 }

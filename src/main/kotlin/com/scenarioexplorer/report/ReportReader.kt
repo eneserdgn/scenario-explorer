@@ -196,8 +196,7 @@ object ReportReader {
                 val status = when (executionStatus.lowercase()) {
                     "passed" -> StepStatus.PASSED
                     "failed" -> StepStatus.FAILED
-                    "skipped" -> StepStatus.SKIPPED
-                    "notexecuted", "not executed" -> StepStatus.NOT_RUN
+                    "skipped", "notexecuted", "not executed" -> StepStatus.NOT_RUN
                     else -> deriveStatus(stepEntries)
                 }
 
@@ -249,8 +248,6 @@ object ReportReader {
                         val conceptStatus = when (conceptResult?.get("status")?.asString?.lowercase()) {
                             "passed" -> StepStatus.PASSED
                             "failed" -> StepStatus.FAILED
-                            "skipped" -> StepStatus.SKIPPED
-                            "not executed" -> StepStatus.NOT_RUN
                             else -> StepStatus.NOT_RUN
                         }
                         val conceptTime = conceptResult?.get("executionTime")?.asLong ?: 0L
@@ -281,8 +278,6 @@ object ReportReader {
         val status = when (stepResult?.get("status")?.asString?.lowercase()) {
             "passed" -> StepStatus.PASSED
             "failed" -> StepStatus.FAILED
-            "skipped" -> StepStatus.SKIPPED
-            "not executed" -> StepStatus.NOT_RUN
             else -> StepStatus.NOT_RUN
         }
 
@@ -332,14 +327,12 @@ object ReportReader {
     private fun deriveStatus(steps: List<StepReportEntry>): StepStatus = when {
         steps.any { it.status == StepStatus.FAILED } -> StepStatus.FAILED
         steps.all { it.status == StepStatus.PASSED } -> StepStatus.PASSED
-        steps.any { it.status == StepStatus.SKIPPED } -> StepStatus.SKIPPED
         else -> StepStatus.NOT_RUN
     }
 
     private fun parseStatus(status: String?): StepStatus = when (status?.lowercase()) {
         "passed" -> StepStatus.PASSED
         "failed" -> StepStatus.FAILED
-        "skipped" -> StepStatus.SKIPPED
         "pending" -> StepStatus.PENDING
         "undefined" -> StepStatus.UNDEFINED
         else -> StepStatus.NOT_RUN

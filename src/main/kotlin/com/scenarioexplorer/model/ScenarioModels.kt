@@ -4,7 +4,7 @@ import java.io.File
 
 enum class ScenarioType { CUCUMBER, GAUGE }
 
-enum class StepStatus { PASSED, FAILED, SKIPPED, PENDING, UNDEFINED, NOT_RUN }
+enum class StepStatus { PASSED, FAILED, PENDING, UNDEFINED, NOT_RUN }
 
 data class DataTable(
     val headers: List<String>,

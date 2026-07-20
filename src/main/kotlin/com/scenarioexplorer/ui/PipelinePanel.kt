@@ -1010,6 +1010,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun formatDuration(ms: Long): String {
         val h = ms / 3_600_000; val m = (ms % 3_600_000) / 60_000; val s = (ms % 60_000) / 1000
-        return if (h > 0) "%02dh %02dm %02ds".format(h, m, s) else "%02dm %02ds".format(m, s)
+        return "%02dh %02dm %02ds".format(h, m, s)
     }
 }

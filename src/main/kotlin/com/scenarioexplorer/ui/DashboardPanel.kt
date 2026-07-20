@@ -273,8 +273,7 @@ class DashboardPanel : JPanel(BorderLayout()) {
         val hours = ms / 3_600_000
         val minutes = (ms % 3_600_000) / 60_000
         val seconds = (ms % 60_000) / 1000
-        return if (hours > 0) "%02dh %02dm %02ds".format(hours, minutes, seconds)
-        else "%02dm %02ds".format(minutes, seconds)
+        return "%02dh %02dm %02ds".format(hours, minutes, seconds)
     }
 
     private fun exportHtml() {
@@ -325,7 +324,6 @@ class DashboardPanel : JPanel(BorderLayout()) {
                     val statusIcon = when (r?.status) {
                         com.scenarioexplorer.model.StepStatus.PASSED -> "✓"
                         com.scenarioexplorer.model.StepStatus.FAILED -> "✗"
-                        com.scenarioexplorer.model.StepStatus.SKIPPED -> "⊘"
                         else -> "○"
                     }
                     val sCb = JCheckBox("$statusIcon ${scenario.name}", true).apply {

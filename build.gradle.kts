@@ -44,6 +44,16 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.2.0</b><br>
+            <ul>
+                <li>Scenarios tree: total and average duration shown for folders and features, right-aligned to the panel edge</li>
+                <li>Long folder/feature/scenario names are truncated with an ellipsis instead of overflowing</li>
+                <li>Visual hierarchy: folder rows are bold/accent-colored, feature rows use a smaller duration style, so levels are easier to tell apart</li>
+                <li>Pass/fail counts always shown for folders and features, including zero counts</li>
+                <li>Removed the "Skipped" status — scenarios previously marked Skipped now show as Not Run</li>
+                <li>Removed feature-level tag display from the Scenarios tree</li>
+                <li>All duration displays now consistently start from hours (e.g. 00h 05m 12s)</li>
+            </ul>
             <b>1.1.0</b><br>
             <ul>
                 <li>Scrollable run history tabs with status indicators (color + icon)</li>

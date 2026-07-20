@@ -43,7 +43,6 @@ object UIConstants {
     fun statusColor(status: String?): Color = when (status?.uppercase()) {
         "PASSED" -> GREEN
         "FAILED" -> RED
-        "SKIPPED" -> YELLOW
         else -> GRAY
     }
 

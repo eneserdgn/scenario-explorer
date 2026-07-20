@@ -192,7 +192,10 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             })
         }
 
-        val treeScroll = JBScrollPane(treePanel.tree).apply { border = JBUI.Borders.empty() }
+        val treeScroll = JBScrollPane(treePanel.tree).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+        }
         val leftPanel = JPanel(BorderLayout()).apply {
             val northPanel = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -589,8 +592,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                     val scenarioHidden = key in hiddenScenarioSet
                     val scenStatus     = latestReports[scenario.name]?.status
                     val icon           = when (scenStatus) {
-                        StepStatus.PASSED  -> "✓"; StepStatus.FAILED  -> "✗"
-                        StepStatus.SKIPPED -> "⊘"; else               -> "○"
+                        StepStatus.PASSED -> "✓"; StepStatus.FAILED -> "✗"; else -> "○"
                     }
                     val sCb = JCheckBox("$icon  ${scenario.name}", !fileHidden && !scenarioHidden)
                     styleCheckbox(sCb)
@@ -665,7 +667,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             add(javax.swing.JSeparator(javax.swing.SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(1, 16) })
             add(statusToggle("✓ Passed", StepStatus.PASSED))
             add(statusToggle("✗ Failed", StepStatus.FAILED))
-            add(statusToggle("⊘ Skipped", StepStatus.SKIPPED))
             add(statusToggle("○ Not Run", null))
         }
 
@@ -723,8 +724,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
                         when (it.status) {
                             StepStatus.PASSED -> 0
                             StepStatus.FAILED -> 1
-                            StepStatus.SKIPPED -> 2
-                            else -> 3
+                            else -> 2
                         }
                     }).first()
                 }
@@ -753,24 +753,23 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
     }
 
     private fun updateSummary(files: List<ScenarioFile>, reports: Map<String, ReportEntry>) {
-        var total = 0; var passed = 0; var failed = 0; var skipped = 0; var dur = 0L; var runCount = 0
+        var total = 0; var passed = 0; var failed = 0; var dur = 0L; var runCount = 0
         for (sf in files) { for (s in sf.scenarios) {
             total++
             val r = reports[s.name]
-            when (r?.status) { StepStatus.PASSED -> passed++; StepStatus.FAILED -> failed++; StepStatus.SKIPPED -> skipped++; else -> {} }
+            when (r?.status) { StepStatus.PASSED -> passed++; StepStatus.FAILED -> failed++; else -> {} }
             val d = r?.duration ?: 0L
             if (d > 0) { dur += d; runCount++ }
         }}
-        val notRun = total - passed - failed - skipped
+        val notRun = total - passed - failed
         val h = dur / 3_600_000; val m = (dur % 3_600_000) / 60_000; val sec = (dur % 60_000) / 1000
-        val timeStr = if (h > 0) "%dh %02dm %02ds".format(h, m, sec) else "%dm %02ds".format(m, sec)
+        val timeStr = "%02dh %02dm %02ds".format(h, m, sec)
         val avgStr = if (runCount > 0) {
             val avgMs = dur / runCount
-            val as_ = (avgMs % 60_000) / 1000
-            val am  = avgMs / 60_000
-            if (am > 0) "${am}m ${as_}s" else "${as_}s"
-        } else "-"
-        summaryLabel.text = "📊 $total  │  ✓ $passed  ✗ $failed  ⊘ $skipped  ○ $notRun  │  ⏱ $timeStr  │  ø $avgStr"
+            val ah = avgMs / 3_600_000; val am = (avgMs % 3_600_000) / 60_000; val as_ = (avgMs % 60_000) / 1000
+            "%02dh %02dm %02ds".format(ah, am, as_)
+        } else "00h 00m 00s"
+        summaryLabel.text = "📊 $total  │  ✓ $passed  ✗ $failed  ○ $notRun  │  ⏱ $timeStr  │  ø $avgStr"
     }
 
     private fun runSelected() {

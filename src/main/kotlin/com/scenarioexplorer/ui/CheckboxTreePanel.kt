@@ -11,6 +11,8 @@ import java.awt.*
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.JTree
+import javax.swing.JViewport
+import javax.swing.SwingConstants
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
@@ -269,12 +271,12 @@ class CheckboxTreePanel(
         val total: Int = 0,
         val passed: Int = 0,
         val failed: Int = 0,
-        val skipped: Int = 0,
-        val totalDuration: Long = 0
+        val totalDuration: Long = 0,
+        val ranCount: Int = 0
     )
 
     private fun computeDirStats(files: List<ScenarioFile>, reports: Map<String, ReportEntry>): NodeStats {
-        var total = 0; var passed = 0; var failed = 0; var skipped = 0; var dur = 0L
+        var total = 0; var passed = 0; var failed = 0; var dur = 0L; var ranCount = 0
         for (sf in files) {
             for (s in sf.scenarios) {
                 total++
@@ -282,29 +284,29 @@ class CheckboxTreePanel(
                 when (r?.status) {
                     StepStatus.PASSED -> passed++
                     StepStatus.FAILED -> failed++
-                    StepStatus.SKIPPED -> skipped++
                     else -> {}
                 }
-                dur += r?.duration ?: 0
+                val d = r?.duration ?: 0
+                if (d > 0) { dur += d; ranCount++ }
             }
         }
-        return NodeStats(total, passed, failed, skipped, dur)
+        return NodeStats(total, passed, failed, dur, ranCount)
     }
 
     private fun computeFileStats(sf: ScenarioFile, reports: Map<String, ReportEntry>): NodeStats {
-        var total = 0; var passed = 0; var failed = 0; var skipped = 0; var dur = 0L
+        var total = 0; var passed = 0; var failed = 0; var dur = 0L; var ranCount = 0
         for (s in sf.scenarios) {
             total++
             val r = reports[s.name]
             when (r?.status) {
                 StepStatus.PASSED -> passed++
                 StepStatus.FAILED -> failed++
-                StepStatus.SKIPPED -> skipped++
                 else -> {}
             }
-            dur += r?.duration ?: 0
+            val d = r?.duration ?: 0
+            if (d > 0) { dur += d; ranCount++ }
         }
-        return NodeStats(total, passed, failed, skipped, dur)
+        return NodeStats(total, passed, failed, dur, ranCount)
     }
 
     // --- Data classes for tree nodes ---
@@ -315,61 +317,128 @@ class CheckboxTreePanel(
     // --- Renderer ---
 
     private class ScenarioCheckboxRenderer : CheckboxTree.CheckboxTreeCellRenderer() {
+        // Estimated per-depth-level indent (px) — used to keep our forced row width
+        // from overrunning the tree's visible edge on deeply-nested (scenario) rows.
+        private val indentPerLevel = 20
+
+        // Row width we report from getPreferredSize(), computed per-node in customizeRenderer.
+        private var rowWidth = 0
+
+        override fun getPreferredSize(): Dimension {
+            val natural = super.getPreferredSize()
+            return if (rowWidth > natural.width) Dimension(rowWidth, natural.height) else natural
+        }
+
         override fun customizeRenderer(
             tree: JTree?, value: Any?, selected: Boolean,
             expanded: Boolean, leaf: Boolean, row: Int, hasFocus: Boolean
         ) {
             val node = value as? CheckedTreeNode ?: return
+            // Use the enclosing scroll pane's viewport width, not tree.width: the viewport
+            // is sized externally (by the split pane), whereas tree.width is itself derived
+            // from each row's preferred size — using it here would create a growth feedback loop.
+            val viewportWidth = (tree?.parent as? JViewport)?.width ?: tree?.width ?: 0
+            val indentOffset = node.level * indentPerLevel
+            rowWidth = (viewportWidth - indentOffset).coerceAtLeast(0)
+            val available = (rowWidth - checkbox.preferredSize.width - END_MARGIN).coerceAtLeast(0)
+            val fm = if (available > 0) tree?.getFontMetrics(textRenderer.font) else null
+
             when (val userObj = node.userObject) {
-                is Scenario -> renderScenario(userObj)
-                is FileNodeData -> renderFile(userObj)
-                is DirNodeData -> renderDir(userObj)
+                is Scenario -> renderScenario(userObj, available, fm)
+                is FileNodeData -> renderFile(userObj, available, fm)
+                is DirNodeData -> renderDir(userObj, available, fm)
             }
         }
 
-        private fun renderScenario(s: Scenario) {
+        private fun renderScenario(s: Scenario, available: Int, fm: FontMetrics?) {
             textRenderer.icon = when (s.status) {
                 StepStatus.PASSED -> AllIcons.RunConfigurations.TestPassed
                 StepStatus.FAILED -> AllIcons.RunConfigurations.TestFailed
-                StepStatus.SKIPPED -> AllIcons.RunConfigurations.TestSkipped
                 StepStatus.NOT_RUN -> AllIcons.Actions.Suspend
                 else -> AllIcons.Actions.Suspend
             }
-            textRenderer.append(" ${s.name} ", SimpleTextAttributes.REGULAR_ATTRIBUTES)
+
+            val durationText = if (s.duration != null && s.duration > 0) formatDuration(s.duration) else null
+            val rightWidth = if (fm != null && durationText != null) fm.stringWidth("  $durationText") else 0
+            val nameBudget = (available - ICON_BUDGET - rightWidth - MARGIN).coerceAtLeast(0)
+            val name = if (fm != null && nameBudget > 0) truncate(" ${s.name} ", nameBudget, fm) else " ${s.name} "
+
+            textRenderer.append(name, SimpleTextAttributes.REGULAR_ATTRIBUTES)
             if (s.tags.isNotEmpty()) {
                 textRenderer.append(" ${s.tags.joinToString(" ")} ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             }
-            if (s.duration != null && s.duration > 0) {
-                textRenderer.append("  ${formatDuration(s.duration)}", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+            if (durationText != null) {
+                textRenderer.append("  $durationText", fileDurationAttrs())
+                if (available > 0) textRenderer.appendTextPadding(available, SwingConstants.RIGHT)
             }
         }
 
-        private fun renderFile(f: FileNodeData) {
+        private fun renderFile(f: FileNodeData, available: Int, fm: FontMetrics?) {
             textRenderer.icon = AllIcons.FileTypes.Text
-            textRenderer.append(f.name, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-            if (f.tags.isNotEmpty()) {
-                textRenderer.append("  ${f.tags.joinToString(" ")}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-            }
-            appendStats(f.stats)
+            appendNodeRow(f.name, f.stats, available, fm, isDir = false)
         }
 
-        private fun renderDir(d: DirNodeData) {
+        private fun renderDir(d: DirNodeData, available: Int, fm: FontMetrics?) {
             textRenderer.icon = AllIcons.Nodes.Folder
-            textRenderer.append(d.name, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-            appendStats(d.stats)
+            appendNodeRow(d.name, d.stats, available, fm, isDir = true)
         }
 
-        private fun appendStats(stats: NodeStats) {
-            if (stats.total == 0) return
-            val parts = mutableListOf<String>()
-            if (stats.passed > 0) parts.add("✓${stats.passed}")
-            if (stats.failed > 0) parts.add("✗${stats.failed}")
-            if (stats.skipped > 0) parts.add("⊘${stats.skipped}")
-            val notRun = stats.total - stats.passed - stats.failed - stats.skipped
-            if (notRun > 0) parts.add("○${notRun}")
+        // Dirs get a bolder, accent-colored, full-size treatment; files get the same
+        // weight but neutral color and a smaller stats/duration block — this is the
+        // main cue for telling a folder row apart from a feature row at a glance.
+        private fun appendNodeRow(name: String, stats: NodeStats, available: Int, fm: FontMetrics?, isDir: Boolean) {
+            val nameAttrs = if (isDir) {
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, UIConstants.BLUE)
+            } else {
+                SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES
+            }
 
-            textRenderer.append("  [${parts.joinToString(" ")}]", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-            textRenderer.append("  ${formatDuration(stats.totalDuration)}", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+            if (stats.total == 0) {
+                textRenderer.append(name, nameAttrs)
+                return
+            }
+            val notRun = stats.total - stats.passed - stats.failed
+            val parts = mutableListOf("✓${stats.passed}", "✗${stats.failed}")
+            if (notRun > 0) parts.add("○${notRun}")
+            val statsText = "[${parts.joinToString(" ")}]"
+
+            val durationText = formatDuration(stats.totalDuration) +
+                if (stats.ranCount > 0) "  (ø ${formatDuration(stats.totalDuration / stats.ranCount)})" else ""
+
+            val statsWidth = fm?.stringWidth(statsText) ?: 0
+            val durationWidth = fm?.stringWidth(durationText) ?: 0
+            val durationTargetX = available
+            val statsTargetX = (available - durationWidth - MARGIN).coerceAtLeast(0)
+            val nameBudget = (statsTargetX - statsWidth - MARGIN).coerceAtLeast(0)
+            val truncatedName = if (fm != null && nameBudget > 0) truncate(name, nameBudget, fm) else name
+
+            val statsAttrs = if (isDir) SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES else SimpleTextAttributes.GRAYED_ATTRIBUTES
+            val durationAttrs = if (isDir) SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES else fileDurationAttrs()
+
+            textRenderer.append(truncatedName, nameAttrs)
+            textRenderer.append("  $statsText", statsAttrs)
+            if (statsTargetX > 0) textRenderer.appendTextPadding(statsTargetX, SwingConstants.RIGHT)
+            textRenderer.append("  $durationText", durationAttrs)
+            if (durationTargetX > 0) textRenderer.appendTextPadding(durationTargetX, SwingConstants.RIGHT)
+        }
+
+        // Smaller than a dir's duration text — reinforces that files/scenarios sit one level deeper.
+        private fun fileDurationAttrs() = SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_ITALIC or SimpleTextAttributes.STYLE_SMALLER,
+            UIUtil.getLabelDisabledForeground()
+        )
+
+        /** Truncates [text] to fit [maxWidth] px (per [fm]), appending an ellipsis when cut. */
+        private fun truncate(text: String, maxWidth: Int, fm: FontMetrics): String {
+            if (fm.stringWidth(text) <= maxWidth) return text
+            val ellipsisWidth = fm.stringWidth(ELLIPSIS)
+            if (ellipsisWidth >= maxWidth) return ELLIPSIS
+            var lo = 0; var hi = text.length
+            while (lo < hi) {
+                val mid = (lo + hi + 1) / 2
+                if (fm.stringWidth(text.substring(0, mid)) + ellipsisWidth <= maxWidth) lo = mid else hi = mid - 1
+            }
+            return text.substring(0, lo).trimEnd() + ELLIPSIS
         }
 
         private fun formatDuration(ms: Long?): String {
@@ -377,11 +446,14 @@ class CheckboxTreePanel(
             val hours = total / 3_600_000
             val minutes = (total % 3_600_000) / 60_000
             val seconds = (total % 60_000) / 1000
-            return if (hours > 0) {
-                "%02dh %02dm %02ds".format(hours, minutes, seconds)
-            } else {
-                "%02dm %02ds".format(minutes, seconds)
-            }
+            return "%02dh %02dm %02ds".format(hours, minutes, seconds)
+        }
+
+        companion object {
+            private const val ICON_BUDGET = 20
+            private const val MARGIN = 12
+            private const val END_MARGIN = 10
+            private const val ELLIPSIS = "…"
         }
     }
 }
