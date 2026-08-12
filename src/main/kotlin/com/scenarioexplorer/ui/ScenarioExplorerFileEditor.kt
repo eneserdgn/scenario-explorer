@@ -45,6 +45,10 @@ class ScenarioExplorerFileEditor(project: Project, private val file: VirtualFile
             scenarioPanel.navigateToScenario(scenarioName)
         }
 
+        errorsPanel.onAddToPipeline = { scenarioNames ->
+            pipelinePanel.addScenarioNamesToActivePipeline(scenarioNames)
+        }
+
         errorsPanel.onCountUpdated = { unique, total ->
             val idx = tabbedPane.indexOfComponent(errorsPanel)
             if (idx >= 0) {

@@ -112,14 +112,21 @@ object ReportReader {
                     } else stepEntries
                 } else stepEntries
 
+                // A failing Before/After hook leaves every real step "skipped" and cucumber
+                // never attaches its error to any step — surface it as its own synthetic entry
+                // so the scenario shows Failed (not Not Run) and the error is actually visible.
+                val allSteps = hookFailureEntries(beforeHooks, "Before Hook") +
+                    finalSteps +
+                    hookFailureEntries(afterHooks, "After Hook")
+
                 // Total duration = all steps + scenario-level before/after hooks
                 val scenarioHooksDuration = (hooksDuration(beforeHooks) + hooksDuration(afterHooks)) / 1_000_000
                 val totalDuration = (finalSteps.mapNotNull { it.duration }.sum()) + scenarioHooksDuration
 
                 results[name] = ReportEntry(
                     scenarioName = name,
-                    status = deriveStatus(finalSteps),
-                    steps = finalSteps,
+                    status = deriveStatus(allSteps),
+                    steps = allSteps,
                     duration = totalDuration,
                     timestamp = timestamp,
                     sourceFile = sourceFile
@@ -127,6 +134,27 @@ object ReportReader {
             }
         }
         return results
+    }
+
+    /** Builds a synthetic step entry for each hook (before/after) whose own result is "failed". */
+    private fun hookFailureEntries(hooks: JsonArray, label: String): List<StepReportEntry> {
+        val entries = mutableListOf<StepReportEntry>()
+        for (hookEl in hooks) {
+            val hook = hookEl.asJsonObject
+            val result = hook.getAsJsonObject("result") ?: continue
+            if (result.get("status")?.asString != "failed") continue
+            val duration = result.get("duration")?.asLong ?: 0L
+            entries.add(
+                StepReportEntry(
+                    text = label,
+                    status = StepStatus.FAILED,
+                    errorMessage = result.get("error_message")?.asString,
+                    duration = if (duration > 0) duration / 1_000_000 else null,
+                    screenshotBase64 = extractCucumberScreenshot(hook)
+                )
+            )
+        }
+        return entries
     }
 
     private fun extractScreenshotFromHooks(hooks: JsonArray): String? {

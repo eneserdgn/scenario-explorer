@@ -390,6 +390,27 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         refreshPipelineCombo(); savePipelines()
     }
 
+    /** Resolves scenario names (e.g. from the Errors tab) to their features and adds them to the active pipeline. Returns true on success. */
+    fun addScenarioNamesToActivePipeline(scenarioNames: List<String>): Boolean {
+        val pipeline = getActivePipeline() ?: run {
+            JOptionPane.showMessageDialog(this, "Önce bir pipeline oluşturun.", "Pipeline Yok", JOptionPane.WARNING_MESSAGE); return false
+        }
+        val nameSet = scenarioNames.toSet()
+        val matchedByFeature = allFiles.mapNotNull { sf ->
+            val matched = sf.scenarios.filter { it.name in nameSet }
+            if (matched.isEmpty()) null else sf to matched
+        }
+        if (matchedByFeature.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Eşleşen senaryo bulunamadı.", "Pipeline'a Ekle", JOptionPane.WARNING_MESSAGE); return false
+        }
+        for ((sf, scenarios) in matchedByFeature) {
+            val entry = PipelineEntry(featurePath = sf.file.path, featureName = sf.featureName, scenarioNames = scenarios.map { it.name })
+            if (pipeline.items.none { it.key == entry.key }) pipeline.items.add(entry)
+        }
+        refreshPipelineCombo(); savePipelines()
+        return true
+    }
+
     private fun removeSelectedFromPipeline() {
         val pipeline = getActivePipeline() ?: return
         for (idx in pipelineItemsList.selectedIndices.sortedDescending()) {

@@ -44,6 +44,11 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.3.0</b><br>
+            <ul>
+                <li>Fixed a failing Before/After hook not being surfaced as an error — it now shows up as a failed step with its full error message in the Errors tab</li>
+                <li>Errors tab: each error group now has an "Add to Pipeline" button to send its affected scenarios straight into the active pipeline</li>
+            </ul>
             <b>1.2.0</b><br>
             <ul>
                 <li>Scenarios tree: total and average duration shown for folders and features, right-aligned to the panel edge</li>

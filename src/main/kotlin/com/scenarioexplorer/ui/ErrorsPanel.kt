@@ -19,6 +19,7 @@ class ErrorsPanel : JPanel(BorderLayout()) {
 
     var onNavigateToScenario: ((String) -> Unit)? = null
     var onCountUpdated: ((Int, Int) -> Unit)? = null
+    var onAddToPipeline: ((List<String>) -> Boolean)? = null
 
     // ── Data ────────────────────────────────────────────────────────
 
@@ -199,7 +200,35 @@ class ErrorsPanel : JPanel(BorderLayout()) {
         detailContent.add(sectionLabel("Hata Mesajı"))
         detailContent.add(errorCard)
         detailContent.add(Box.createVerticalStrut(8))
-        detailContent.add(sectionLabel("Etkilenen Senaryolar  (${group.occurrences.size})"))
+
+        val addToPipelineButton = JButton("→ Pipeline'a Ekle").apply {
+            toolTipText = "Bu hataya ait senaryoları aktif pipeline'a ekle"
+            isFocusPainted = false
+            font = font.deriveFont(11f)
+        }
+        val defaultLabel = addToPipelineButton.text
+        addToPipelineButton.addActionListener {
+            val names = group.occurrences.map { it.scenarioName }.distinct()
+            if (names.isEmpty()) return@addActionListener
+            val added = onAddToPipeline?.invoke(names) ?: false
+            if (added) {
+                addToPipelineButton.text = "✓ Eklendi"
+                addToPipelineButton.isEnabled = false
+                Timer(1500) {
+                    addToPipelineButton.text = defaultLabel
+                    addToPipelineButton.isEnabled = true
+                }.apply { isRepeats = false }.start()
+            }
+        }
+
+        val scenariosHeader = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+            maximumSize = Dimension(Int.MAX_VALUE, 26)
+            add(sectionLabel("Etkilenen Senaryolar  (${group.occurrences.size})"), BorderLayout.WEST)
+            add(addToPipelineButton, BorderLayout.EAST)
+        }
+        detailContent.add(scenariosHeader)
 
         for (occ in group.occurrences) {
             detailContent.add(buildOccurrenceRow(occ))
