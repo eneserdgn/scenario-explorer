@@ -2,9 +2,12 @@ package com.scenarioexplorer.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.Project
+import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import com.scenarioexplorer.model.Scenario
@@ -26,6 +29,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.*
+import javax.swing.tree.DefaultMutableTreeNode
+import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
+import javax.swing.tree.TreeSelectionModel
 
 class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
@@ -47,8 +54,10 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     private val nextDelaySpinner = JSpinner(SpinnerNumberModel(5, 0, 600, 5))
     private val chunkSizeSpinner = JSpinner(SpinnerNumberModel(1, 1, 50, 1))
 
-    private val sourceListModel = DefaultListModel<FeatureSourceItem>()
-    private val sourceList = JBList(sourceListModel)
+    // Features grouped by folder (like the Scenarios tab): root -> SourceDir nodes -> FeatureSourceItem nodes
+    private val sourceRoot = DefaultMutableTreeNode("Features")
+    private val sourceTreeModel = DefaultTreeModel(sourceRoot)
+    private val sourceTree = Tree(sourceTreeModel)
 
     // Two-page layout: "list" (all pipelines) and "detail" (one pipeline's contents + run)
     private val pagesLayout = CardLayout()
@@ -100,6 +109,8 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     data class FeatureSourceItem(val sf: ScenarioFile, val stats: String)
 
+    data class SourceDir(val name: String, val path: String, val stats: String)
+
     enum class RunItemStatus { WAITING, RUNNING, PASSED, FAILED, CANCELLED }
 
     data class PipelineRunItem(
@@ -143,10 +154,12 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     init {
         background = UIConstants.surfaceBackground()
-        sourceList.cellRenderer = FeatureSourceRenderer()
-        sourceList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
-        sourceList.dragEnabled = true
-        sourceList.transferHandler = SourceTransferHandler()
+        sourceTree.cellRenderer = SourceTreeRenderer()
+        sourceTree.isRootVisible = false
+        sourceTree.showsRootHandles = true
+        sourceTree.selectionModel.selectionMode = TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION
+        sourceTree.dragEnabled = true
+        sourceTree.transferHandler = SourceTransferHandler()
         pipelineItemsList.cellRenderer = PipelineEntryRenderer()
         pipelineItemsList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         pipelineItemsList.dropMode = DropMode.INSERT
@@ -166,9 +179,9 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         leftPanel.add(JBLabel("Feature'lar").apply {
             font = font.deriveFont(Font.BOLD, 13f); border = JBUI.Borders.empty(4, 8)
         }, BorderLayout.NORTH)
-        leftPanel.add(JBScrollPane(sourceList).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+        leftPanel.add(JBScrollPane(sourceTree).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
         leftPanel.add(JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
-            add(addScenariosToPipelineBtn.apply { toolTipText = "Seçili feature'lardan senaryo seçerek pipeline'a ekle" })
+            add(addScenariosToPipelineBtn.apply { toolTipText = "Seçili klasör/feature'lardan senaryo seçerek pipeline'a ekle" })
         }, BorderLayout.SOUTH)
 
         val rightPanel = JPanel(BorderLayout()).apply { border = JBUI.Borders.empty(4) }
@@ -289,15 +302,61 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         refreshPipelineList()
     }
 
-    private fun rebuildSourceList() {
-        sourceListModel.clear()
-        for (sf in allFiles) {
-            val total = sf.scenarios.size
-            val passed = sf.scenarios.count { latestReports[it.name]?.status == StepStatus.PASSED }
-            val failed = sf.scenarios.count { latestReports[it.name]?.status == StepStatus.FAILED }
-            val notRun = total - passed - failed
-            sourceListModel.addElement(FeatureSourceItem(sf, "[$total | ✓$passed ✗$failed ○$notRun]"))
+    private fun statsText(scenarios: List<Scenario>): String {
+        val total = scenarios.size
+        val passed = scenarios.count { latestReports[it.name]?.status == StepStatus.PASSED }
+        val failed = scenarios.count { latestReports[it.name]?.status == StepStatus.FAILED }
+        return "[$total | ✓$passed ✗$failed ○${total - passed - failed}]"
+    }
+
+    /** Features selected in the source tree — a selected folder stands for all features under it. */
+    private fun selectedFeatureItems(): List<FeatureSourceItem> {
+        val result = LinkedHashMap<String, FeatureSourceItem>()
+        fun collect(node: DefaultMutableTreeNode) {
+            val obj = node.userObject
+            if (obj is FeatureSourceItem) { result[obj.sf.file.path] = obj; return }
+            for (i in 0 until node.childCount) collect(node.getChildAt(i) as DefaultMutableTreeNode)
         }
+        for (path in sourceTree.selectionPaths ?: emptyArray()) {
+            (path.lastPathComponent as? DefaultMutableTreeNode)?.let { collect(it) }
+        }
+        return result.values.toList()
+    }
+
+    private fun rebuildSourceList() {
+        // Keep the user's expanded folders and selected features across refreshes
+        val hadFolders = sourceRoot.childCount > 0
+        val expandedDirs = mutableSetOf<String>()
+        for (i in 0 until sourceRoot.childCount) {
+            val node = sourceRoot.getChildAt(i) as DefaultMutableTreeNode
+            val dir = node.userObject as? SourceDir ?: continue
+            if (sourceTree.isExpanded(TreePath(node.path))) expandedDirs.add(dir.path)
+        }
+        val selectedFeaturePaths = selectedFeatureItems().map { it.sf.file.path }.toSet()
+
+        sourceRoot.removeAllChildren()
+        val grouped = allFiles.groupBy { it.file.parentFile?.path ?: "" }
+        for ((dirPath, files) in grouped.toSortedMap()) {
+            val dirName = java.io.File(dirPath).name.ifEmpty { dirPath }
+            val dirNode = DefaultMutableTreeNode(SourceDir(dirName, dirPath, statsText(files.flatMap { it.scenarios })))
+            for (sf in files) dirNode.add(DefaultMutableTreeNode(FeatureSourceItem(sf, statsText(sf.scenarios))))
+            sourceRoot.add(dirNode)
+        }
+        sourceTreeModel.reload()
+
+        val reselect = mutableListOf<TreePath>()
+        for (i in 0 until sourceRoot.childCount) {
+            val dirNode = sourceRoot.getChildAt(i) as DefaultMutableTreeNode
+            val dir = dirNode.userObject as SourceDir
+            // First time the tree gets content, open every folder; afterwards keep the user's state
+            if (!hadFolders || dir.path in expandedDirs) sourceTree.expandPath(TreePath(dirNode.path))
+            for (j in 0 until dirNode.childCount) {
+                val featureNode = dirNode.getChildAt(j) as DefaultMutableTreeNode
+                val item = featureNode.userObject as FeatureSourceItem
+                if (item.sf.file.path in selectedFeaturePaths) reselect.add(TreePath(featureNode.path))
+            }
+        }
+        if (reselect.isNotEmpty()) sourceTree.selectionPaths = reselect.toTypedArray()
     }
 
     // === PIPELINE CRUD ===
@@ -532,8 +591,11 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         val pipeline = getActivePipeline() ?: run {
             JOptionPane.showMessageDialog(this, "Önce bir pipeline oluşturun.", "Pipeline Yok", JOptionPane.WARNING_MESSAGE); return
         }
-        val selected = sourceList.selectedValuesList
-        if (selected.isEmpty()) return
+        val selected = selectedFeatureItems()
+        if (selected.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Önce soldan bir klasör veya feature seçin.", "Seçim Yok", JOptionPane.INFORMATION_MESSAGE)
+            return
+        }
 
         // Senaryo seçim dialog'u
         val checkboxPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
@@ -1127,18 +1189,23 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // === RENDERERS ===
 
-    private inner class FeatureSourceRenderer : ListCellRenderer<FeatureSourceItem> {
-        private val label = JBLabel()
-        override fun getListCellRendererComponent(list: JList<out FeatureSourceItem>, value: FeatureSourceItem?, index: Int, isSelected: Boolean, cellHasFocus: Boolean): Component {
-            if (value == null) return label
-            label.text = "📄 ${value.sf.featureName}  ${value.stats}"
-            label.font = label.font.deriveFont(Font.PLAIN, 12f)
-            label.border = JBUI.Borders.empty(4, 6)
-            label.icon = null
-            label.isOpaque = true
-            if (isSelected) { label.background = list.selectionBackground; label.foreground = list.selectionForeground }
-            else { label.background = list.background; label.foreground = UIUtil.getLabelForeground() }
-            return label
+    private class SourceTreeRenderer : ColoredTreeCellRenderer() {
+        override fun customizeCellRenderer(
+            tree: JTree, value: Any?, selected: Boolean,
+            expanded: Boolean, leaf: Boolean, row: Int, hasFocus: Boolean
+        ) {
+            when (val obj = (value as? DefaultMutableTreeNode)?.userObject) {
+                is SourceDir -> {
+                    icon = AllIcons.Nodes.Folder
+                    append(obj.name, SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, UIConstants.BLUE))
+                    append("  ${obj.stats}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is FeatureSourceItem -> {
+                    icon = AllIcons.FileTypes.Text
+                    append(obj.sf.featureName, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append("  ${obj.stats}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+            }
         }
     }
 
@@ -1164,7 +1231,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     private inner class SourceTransferHandler : TransferHandler() {
         override fun getSourceActions(c: JComponent?) = COPY
         override fun createTransferable(c: JComponent?): Transferable? {
-            val selected = sourceList.selectedValuesList
+            val selected = selectedFeatureItems()
             if (selected.isEmpty()) return null
             return StringSelection(selected.joinToString("\n") { "FEATURE:${it.sf.file.path}\t${it.sf.featureName}" })
         }
