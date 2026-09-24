@@ -44,6 +44,17 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.4.0</b><br>
+            <ul>
+                <li>Pipeline tab redesigned into two pages: a card list of your pipelines, and a detail page to add/remove scenarios and run</li>
+                <li>Pipeline cards show pass / fail / not-run counts and a live "running" status</li>
+                <li>Multiple pipelines can now run at the same time, each with its own log, status and progress</li>
+                <li>Pipeline defaults: chunk 1, 5s start delay, 5s after-finish delay. Removed "Add Feature" and Auto Retry</li>
+                <li>Errors tab: "Add to Pipeline" now asks which pipeline to add to when there are several</li>
+                <li>Scenarios tree: removed checkboxes and the side-menu Run action; the scenario Run button in the detail panel remains</li>
+                <li>Windows: fixed pipeline compile step picking the Unix Maven wrapper, and folder names showing the full path</li>
+                <li>Pipeline shared build directory is now cleaned up when the run completes, and concurrent runs use unique report/build names</li>
+            </ul>
             <b>1.3.0</b><br>
             <ul>
                 <li>Fixed a failing Before/After hook not being surfaced as an error — it now shows up as a failed step with its full error message in the Errors tab</li>

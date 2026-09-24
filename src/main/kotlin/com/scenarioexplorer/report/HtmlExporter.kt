@@ -120,7 +120,7 @@ object HtmlExporter {
         var scenarioIdx = 0
         val grouped = files.groupBy { it.file.parentFile?.path ?: "" }
         for ((dirPath, scenarioFiles) in grouped.toSortedMap()) {
-            val dirName = dirPath.substringAfterLast("/").ifEmpty { dirPath }
+            val dirName = java.io.File(dirPath).name.ifEmpty { dirPath }
             val dirTotal = scenarioFiles.sumOf { it.scenarios.size }
             val dirP = scenarioFiles.sumOf { sf -> sf.scenarios.count { reports[it.name]?.status == StepStatus.PASSED } }
             val dirF = scenarioFiles.sumOf { sf -> sf.scenarios.count { reports[it.name]?.status == StepStatus.FAILED } }

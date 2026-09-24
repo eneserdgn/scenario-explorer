@@ -296,7 +296,7 @@ class DashboardPanel : JPanel(BorderLayout()) {
         val grouped = currentFiles.groupBy { it.file.parentFile?.path ?: "" }
 
         for ((dirPath, scenarioFiles) in grouped.toSortedMap()) {
-            val dirName = dirPath.substringAfterLast("/").ifEmpty { dirPath }
+            val dirName = java.io.File(dirPath).name.ifEmpty { dirPath }
             val fileChecks = mutableListOf<FileCheck>()
 
             val dirCb = JCheckBox("📁 $dirName", true).apply {

@@ -42,6 +42,8 @@ class RunHandle {
 
 object ScenarioRunner {
 
+    private val batchSeq = java.util.concurrent.atomic.AtomicInteger()
+
     fun run(
         project: Project, scenario: Scenario,
         onOutput: (String) -> Unit, onFinished: (Int) -> Unit
@@ -89,7 +91,7 @@ object ScenarioRunner {
         val basePath = project.basePath ?: return null
         val settings = ScenarioExplorerSettings.getInstance(project).state
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
-        val batchName = "BatchRun_$timestamp"
+        val batchName = "BatchRun_${timestamp}_${batchSeq.incrementAndGet()}"
         val reportDir = resolveReportDir(basePath, settings.reportPath)
         val handle = RunHandle()
 
@@ -180,7 +182,7 @@ object ScenarioRunner {
         return java.io.File(basePath, "Reports").absolutePath
     }
 
-    private fun resolveMvnExecutable(basePath: String): String {
+    fun resolveMvnExecutable(basePath: String): String {
         val isWindows = com.intellij.openapi.util.SystemInfo.isWindows
         return when {
             isWindows && java.io.File(basePath, "mvnw.cmd").exists() -> "mvnw.cmd"
@@ -205,9 +207,7 @@ object ScenarioRunner {
         val buildRoot = java.io.File(basePath, ".scenario-explorer-builds")
         buildRoot.mkdirs()
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS").format(java.util.Date())
-        val dir = java.io.File(buildRoot, "${prefix}_$timestamp")
-        dir.mkdirs()
-        return dir
+        return java.nio.file.Files.createTempDirectory(buildRoot.toPath(), "${prefix}_${timestamp}_").toFile()
     }
 
     private fun buildCucumberCommand(

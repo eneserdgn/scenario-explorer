@@ -45,8 +45,11 @@ class ScenarioExplorerFileEditor(project: Project, private val file: VirtualFile
             scenarioPanel.navigateToScenario(scenarioName)
         }
 
+        // A finished/stopped pipeline run wrote new reports — re-read them so counts everywhere catch up
+        pipelinePanel.onRunFinished = { scenarioPanel.refresh() }
+
         errorsPanel.onAddToPipeline = { scenarioNames ->
-            pipelinePanel.addScenarioNamesToActivePipeline(scenarioNames)
+            pipelinePanel.addScenarioNamesToPipeline(scenarioNames)
         }
 
         errorsPanel.onCountUpdated = { unique, total ->

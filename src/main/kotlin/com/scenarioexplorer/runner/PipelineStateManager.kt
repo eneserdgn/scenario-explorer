@@ -1,19 +1,20 @@
 package com.scenarioexplorer.runner
 
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import com.intellij.openapi.project.Project
 import java.io.File
 
 /**
  * Pipeline çalışma state'ini ve loglarını diske kaydeder/yükler.
  * IDE kapanıp açıldığında veya proje değiştirildiğinde son durumu geri yükler.
+ *
+ * Birden fazla pipeline aynı anda koşabildiği için her pipeline kendi [key]'i altında saklanır.
  */
 object PipelineStateManager {
 
     private const val STATE_DIR = ".scenario-explorer-state"
-    private const val STATE_FILE = "pipeline-state.json"
-    private const val LOG_FILE = "pipeline-log.txt"
+    private const val STATE_PREFIX = "pipeline-state-"
+    private const val LOG_PREFIX = "pipeline-log-"
     private const val OUTPUT_PREFIX = "output-"
 
     private val gson = Gson()
@@ -40,51 +41,58 @@ object PipelineStateManager {
         return dir
     }
 
-    fun saveState(project: Project, pipelineName: String, running: Boolean, items: List<RunItemState>) {
+    fun saveState(project: Project, key: String, pipelineName: String, running: Boolean, items: List<RunItemState>) {
         try {
             val state = PipelineState(running, pipelineName, items, System.currentTimeMillis())
-            File(stateDir(project), STATE_FILE).writeText(gson.toJson(state))
+            File(stateDir(project), "$STATE_PREFIX$key.json").writeText(gson.toJson(state))
         } catch (_: Exception) {}
     }
 
-    fun loadState(project: Project): PipelineState? {
+    /** All saved pipeline states as (key, state) pairs. */
+    fun listStates(project: Project): List<Pair<String, PipelineState>> {
         return try {
-            val file = File(stateDir(project), STATE_FILE)
-            if (!file.exists()) return null
-            gson.fromJson(file.readText(), PipelineState::class.java)
-        } catch (_: Exception) { null }
+            stateDir(project).listFiles { f -> f.name.startsWith(STATE_PREFIX) && f.name.endsWith(".json") }
+                ?.mapNotNull { f ->
+                    val key = f.name.removePrefix(STATE_PREFIX).removeSuffix(".json")
+                    val state = try { gson.fromJson(f.readText(), PipelineState::class.java) } catch (_: Exception) { null }
+                    if (state == null) null else key to state
+                } ?: emptyList()
+        } catch (_: Exception) { emptyList() }
     }
 
-    fun saveLog(project: Project, logText: String) {
+    fun saveLog(project: Project, key: String, logText: String) {
         try {
-            File(stateDir(project), LOG_FILE).writeText(logText)
+            File(stateDir(project), "$LOG_PREFIX$key.txt").writeText(logText)
         } catch (_: Exception) {}
     }
 
-    fun loadLog(project: Project): String {
+    fun loadLog(project: Project, key: String): String {
         return try {
-            val file = File(stateDir(project), LOG_FILE)
+            val file = File(stateDir(project), "$LOG_PREFIX$key.txt")
             if (file.exists()) file.readText() else ""
         } catch (_: Exception) { "" }
     }
 
-    fun saveItemOutput(project: Project, index: Int, outputText: String) {
+    fun saveItemOutput(project: Project, key: String, index: Int, outputText: String) {
         try {
-            File(stateDir(project), "$OUTPUT_PREFIX$index.txt").writeText(outputText)
+            File(stateDir(project), "$OUTPUT_PREFIX$key-$index.txt").writeText(outputText)
         } catch (_: Exception) {}
     }
 
-    fun loadItemOutput(project: Project, index: Int): String {
+    fun loadItemOutput(project: Project, key: String, index: Int): String {
         return try {
-            val file = File(stateDir(project), "$OUTPUT_PREFIX$index.txt")
+            val file = File(stateDir(project), "$OUTPUT_PREFIX$key-$index.txt")
             if (file.exists()) file.readText() else ""
         } catch (_: Exception) { "" }
     }
 
-    fun clearOutputs(project: Project) {
+    /** Removes everything saved for one pipeline (state, log, item outputs). */
+    fun clear(project: Project, key: String) {
         try {
-            val dir = stateDir(project)
-            dir.listFiles()?.filter { it.name.startsWith(OUTPUT_PREFIX) }?.forEach { it.delete() }
+            stateDir(project).listFiles()?.filter {
+                it.name == "$STATE_PREFIX$key.json" || it.name == "$LOG_PREFIX$key.txt" ||
+                    (it.name.startsWith("$OUTPUT_PREFIX$key-") && it.name.endsWith(".txt"))
+            }?.forEach { it.delete() }
         } catch (_: Exception) {}
     }
 

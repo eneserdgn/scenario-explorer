@@ -36,7 +36,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
     private var latestReports: Map<String, ReportEntry> = emptyMap()
 
     private val detailPanel = ScenarioDetailPanel(project)
-    private val treePanel = CheckboxTreePanel { scenario ->
+    private val treePanel = ScenarioTreePanel { scenario ->
         val reports = allReports[scenario.name] ?: emptyList()
         detailPanel.showScenario(scenario, reports)
     }
@@ -152,10 +152,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
     // Track runs
     private val activeRuns = mutableListOf<OutputTab>()
 
-    // Retry mekanizması state
-    private var retryRunning = false
-    private var retryCancelled = false
-
     init {
         // Wire detail panel to use tabbed output
         detailPanel.onRunScenario = { scenario ->
@@ -197,12 +193,7 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
         }
         val leftPanel = JPanel(BorderLayout()).apply {
-            val northPanel = JPanel().apply {
-                layout = BoxLayout(this, BoxLayout.Y_AXIS)
-                add(topPanel)
-                add(treePanel.filterButtonsPanel)
-            }
-            add(northPanel, BorderLayout.NORTH)
+            add(topPanel, BorderLayout.NORTH)
             add(treeScroll, BorderLayout.CENTER)
         }
 
@@ -353,9 +344,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
         val refreshAction = object : AnAction("Refresh", "Rescan scenarios and reports", AllIcons.Actions.Refresh) {
             override fun actionPerformed(e: AnActionEvent) = refresh()
         }
-        val runSelectedAction = object : AnAction("Run Selected", "Run all checked scenarios", AllIcons.Actions.Execute) {
-            override fun actionPerformed(e: AnActionEvent) = runSelected()
-        }
         val setReportPathAction = object : AnAction("Set Report Path", "Choose report JSON folder", AllIcons.Actions.MenuOpen) {
             override fun actionPerformed(e: AnActionEvent) = chooseReportPath()
         }
@@ -365,7 +353,6 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
 
         val group = DefaultActionGroup().apply {
             add(refreshAction)
-            add(runSelectedAction)
             addSeparator()
             add(setReportPathAction)
             add(setScanPathsAction)
@@ -770,287 +757,5 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             "%02dh %02dm %02ds".format(ah, am, as_)
         } else "00h 00m 00s"
         summaryLabel.text = "📊 $total  │  ✓ $passed  ✗ $failed  ○ $notRun  │  ⏱ $timeStr  │  ø $avgStr"
-    }
-
-    private fun runSelected() {
-        val selected = treePanel.getCheckedScenarios()
-        if (selected.isEmpty()) return
-
-        // Refresh first, then run
-        refresh {
-            if (selected.size == 1) {
-                val scenario = selected.first()
-                val tab = createOutputTab(scenario.name.take(30))
-                activeRuns.add(tab)
-                appendAnsi(tab.textPane, "Running: ${scenario.name}...\n\n")
-
-                Thread {
-                    ScenarioRunner.run(
-                        project, scenario,
-                        onOutput = { text -> SwingUtilities.invokeLater { appendAnsi(tab.textPane, text) } },
-                        onFinished = { exitCode ->
-                            SwingUtilities.invokeLater {
-                                appendAnsi(tab.textPane, "\n--- Finished (exit code: $exitCode) ---\n")
-                                tab.markFinished(exitCode)
-                                refresh()
-                            }
-                        }
-                    )?.let { handle -> tab.runHandle = handle }
-                }.start()
-            } else {
-                val tab = createOutputTab("Batch (${selected.size})")
-                activeRuns.add(tab)
-                appendAnsi(tab.textPane, "Running ${selected.size} scenario(s)...\n")
-                appendAnsi(tab.textPane, "Scenarios: ${selected.joinToString(", ") { it.name }}\n\n")
-
-                Thread {
-                    ScenarioRunner.runBatch(
-                        project, selected,
-                        onOutput = { text -> SwingUtilities.invokeLater { appendAnsi(tab.textPane, text) } },
-                        onFinished = { exitCode ->
-                            SwingUtilities.invokeLater {
-                                appendAnsi(tab.textPane, "\n--- Batch finished (exit code: $exitCode) ---\n")
-                                tab.markFinished(exitCode)
-                                refresh()
-                            }
-                        }
-                    )?.let { handle -> tab.runHandle = handle }
-                }.start()
-            }
-        }
-    }
-
-    private fun retrySelected() {
-        val selected = treePanel.getCheckedScenarios()
-        if (selected.isEmpty()) return
-
-        // Retry ayarlarını sor
-        val retryCountSpinner = JSpinner(javax.swing.SpinnerNumberModel(3, 1, 20, 1))
-        val retryDelaySpinner = JSpinner(javax.swing.SpinnerNumberModel(120, 0, 600, 10))
-        val maxParallelSpinner = JSpinner(javax.swing.SpinnerNumberModel(5, 1, 20, 1))
-        val startDelaySpinner = JSpinner(javax.swing.SpinnerNumberModel(30, 0, 600, 5))
-        val nextDelaySpinner = JSpinner(javax.swing.SpinnerNumberModel(120, 0, 600, 10))
-        val settingsPanel = JPanel(java.awt.GridLayout(5, 2, 8, 4)).apply {
-            add(com.intellij.ui.components.JBLabel("Max Paralel:"))
-            add(maxParallelSpinner)
-            add(com.intellij.ui.components.JBLabel("Başlatma Arası (sn):"))
-            add(startDelaySpinner)
-            add(com.intellij.ui.components.JBLabel("Biten Sonrası (sn):"))
-            add(nextDelaySpinner)
-            add(com.intellij.ui.components.JBLabel("Retry sayısı:"))
-            add(retryCountSpinner)
-            add(com.intellij.ui.components.JBLabel("Retry bekleme (sn):"))
-            add(retryDelaySpinner)
-        }
-        val result = JOptionPane.showConfirmDialog(this, settingsPanel,
-            "Retry Ayarları (${selected.size} senaryo)", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE)
-        if (result != JOptionPane.OK_OPTION) return
-
-        val maxRetries = retryCountSpinner.value as Int
-        val retrySec = retryDelaySpinner.value as Int
-        val maxParallel = maxParallelSpinner.value as Int
-        val startDelaySec = startDelaySpinner.value as Int
-        val nextDelaySec = nextDelaySpinner.value as Int
-
-        val tab = createOutputTab("Retry (${selected.size})")
-        activeRuns.add(tab)
-        retryRunning = true
-        retryCancelled = false
-
-        tab.stopButton.addActionListener { retryCancelled = true }
-
-        Thread {
-            var currentScenarios = selected.toList()
-            for (attempt in 1..maxRetries) {
-                if (retryCancelled || currentScenarios.isEmpty()) break
-
-                SwingUtilities.invokeLater {
-                    appendAnsi(tab.textPane, "\n═══════════════════════════════════\n")
-                    appendAnsi(tab.textPane, "🔄 Retry $attempt/$maxRetries — ${currentScenarios.size} senaryo koşuluyor (max $maxParallel paralel)\n")
-                    appendAnsi(tab.textPane, "═══════════════════════════════════\n\n")
-                }
-
-                // Pre-retry komutu (ilk koşum hariç)
-                if (attempt > 1) {
-                    val preRetryCmd = ScenarioExplorerSettings.getInstance(project).state.preRetryCommand.trim()
-                    if (preRetryCmd.isNotEmpty() && !retryCancelled) {
-                        SwingUtilities.invokeLater { appendAnsi(tab.textPane, "⚙ Pre-retry komutu: $preRetryCmd\n") }
-                        try {
-                            val basePath = project.basePath ?: ""
-                            val parts = preRetryCmd.split("\\s+".toRegex())
-                            val cmdLine = com.intellij.execution.configurations.GeneralCommandLine().apply {
-                                workDirectory = java.io.File(basePath)
-                                exePath = parts.first()
-                                if (parts.size > 1) addParameters(parts.drop(1))
-                            }
-                            val preLatch = java.util.concurrent.CountDownLatch(1)
-                            val handler = com.intellij.execution.process.OSProcessHandler(cmdLine)
-                            handler.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
-                                override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
-                                    SwingUtilities.invokeLater { appendAnsi(tab.textPane, event.text) }
-                                }
-                                override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
-                                    preLatch.countDown()
-                                }
-                            })
-                            handler.startNotify()
-                            preLatch.await()
-                            SwingUtilities.invokeLater { appendAnsi(tab.textPane, "✓ Pre-retry komutu tamamlandı\n\n") }
-                        } catch (e: Exception) {
-                            SwingUtilities.invokeLater { appendAnsi(tab.textPane, "⚠ Pre-retry hatası: ${e.message}\n\n") }
-                        }
-                    }
-
-                    // Retry bekleme
-                    if (retrySec > 0 && !retryCancelled) {
-                        for (i in retrySec downTo 1) {
-                            if (retryCancelled) break
-                            SwingUtilities.invokeLater { appendAnsi(tab.textPane, "\r⏳ Retry bekleme: ${i}sn...") }
-                            Thread.sleep(1000)
-                        }
-                        SwingUtilities.invokeLater { appendAnsi(tab.textPane, "\n") }
-                    }
-                }
-
-                if (retryCancelled) break
-
-                // Feature bazlı grupla
-                val featureGroups = currentScenarios.groupBy { it.file.path }
-
-                // Shared target oluştur — compile bir kez yapılsın
-                val basePath = project.basePath ?: break
-                val sharedTarget = ScenarioRunner.createIsolatedTargetDir(basePath, "retry")
-                val settings = ScenarioExplorerSettings.getInstance(project).state
-
-                // Compile
-                if (settings.buildBeforeRun) {
-                    SwingUtilities.invokeLater { appendAnsi(tab.textPane, "🔨 Compile ediliyor...\n") }
-                    val mvnExe = if (java.io.File(basePath, "mvnw").exists()) "./mvnw"
-                                 else if (java.io.File(basePath, "mvnw.cmd").exists()) "mvnw.cmd"
-                                 else "mvn"
-                    val compileLatch = java.util.concurrent.CountDownLatch(1)
-                    var compileOk = false
-                    val cmd = com.intellij.execution.configurations.GeneralCommandLine().apply {
-                        workDirectory = java.io.File(basePath)
-                        exePath = mvnExe
-                        addParameters("compile", "test-compile")
-                        addParameters(ScenarioRunner.isolatedBuildParams(sharedTarget))
-                    }
-                    try {
-                        val handler = com.intellij.execution.process.OSProcessHandler(cmd)
-                        handler.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
-                            override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
-                                SwingUtilities.invokeLater { appendAnsi(tab.textPane, event.text) }
-                            }
-                            override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
-                                compileOk = event.exitCode == 0; compileLatch.countDown()
-                            }
-                        })
-                        handler.startNotify()
-                    } catch (e: Exception) {
-                        SwingUtilities.invokeLater { appendAnsi(tab.textPane, "✗ Compile hatası: ${e.message}\n") }
-                        compileLatch.countDown()
-                    }
-                    compileLatch.await()
-                    if (!compileOk || retryCancelled) {
-                        SwingUtilities.invokeLater { appendAnsi(tab.textPane, "✗ Compile başarısız, retry iptal.\n") }
-                        try { sharedTarget.deleteRecursively() } catch (_: Exception) {}
-                        break
-                    }
-                    SwingUtilities.invokeLater { appendAnsi(tab.textPane, "✓ Compile tamamlandı\n\n") }
-                }
-
-                // Paralel koşum — feature grupları sırayla queue'ya girer
-                val queue = java.util.concurrent.ConcurrentLinkedQueue(featureGroups.entries.toList())
-                val activeCount = java.util.concurrent.atomic.AtomicInteger(0)
-                val allDone = java.util.concurrent.CountDownLatch(featureGroups.size)
-                var launched = 0
-
-                while (queue.isNotEmpty() && !retryCancelled) {
-                    if (activeCount.get() >= maxParallel) { Thread.sleep(1000); continue }
-                    val entry = queue.poll() ?: break
-                    if (retryCancelled) { allDone.countDown(); break }
-
-                    val isInitial = launched < maxParallel
-                    val delaySec = if (isInitial) startDelaySec else nextDelaySec
-                    if (launched > 0 && delaySec > 0) {
-                        SwingUtilities.invokeLater { appendAnsi(tab.textPane, "⏳ ${delaySec}sn bekleniyor...\n") }
-                        for (i in 0 until delaySec) { if (retryCancelled) break; Thread.sleep(1000) }
-                        if (retryCancelled) { allDone.countDown(); break }
-                    }
-
-                    launched++
-                    activeCount.incrementAndGet()
-                    val featureName = entry.value.firstOrNull()?.file?.name ?: "?"
-                    SwingUtilities.invokeLater { appendAnsi(tab.textPane, "▶ Başlatılıyor: $featureName (${entry.value.size} senaryo)\n") }
-
-                    Thread {
-                        try {
-                            val batchLatch = java.util.concurrent.CountDownLatch(1)
-                            var batchExit = -1
-                            val handle = ScenarioRunner.runBatch(
-                                project, entry.value,
-                                onOutput = { text -> SwingUtilities.invokeLater { appendAnsi(tab.textPane, text) } },
-                                onFinished = { code -> batchExit = code; batchLatch.countDown() },
-                                sharedTargetDir = sharedTarget
-                            )
-                            handle?.let { tab.runHandle = it }
-                            batchLatch.await()
-                            SwingUtilities.invokeLater {
-                                val icon = if (batchExit == 0) "✓" else "✗"
-                                appendAnsi(tab.textPane, "$icon $featureName tamamlandı (exit: $batchExit)\n")
-                            }
-                        } catch (e: Exception) {
-                            SwingUtilities.invokeLater { appendAnsi(tab.textPane, "✗ Hata: $featureName — ${e.message}\n") }
-                        } finally {
-                            activeCount.decrementAndGet()
-                            allDone.countDown()
-                        }
-                    }.start()
-                }
-
-                // Tüm feature'ların bitmesini bekle
-                allDone.await()
-
-                // Shared target temizle
-                try { sharedTarget.deleteRecursively() } catch (_: Exception) {}
-
-                if (retryCancelled) break
-
-                // Refresh reports ve fail olanları bul
-                val refreshLatch = java.util.concurrent.CountDownLatch(1)
-                SwingUtilities.invokeLater { refresh { refreshLatch.countDown() } }
-                refreshLatch.await()
-
-                val failedScenarios = currentScenarios.filter { s ->
-                    val report = latestReports[s.name]
-                    report == null || report.status == StepStatus.FAILED || report.status == StepStatus.NOT_RUN
-                }
-
-                val passedCount = currentScenarios.size - failedScenarios.size
-                SwingUtilities.invokeLater {
-                    appendAnsi(tab.textPane, "\n--- Retry $attempt sonuç: ✓$passedCount ✗${failedScenarios.size} ---\n")
-                }
-
-                if (failedScenarios.isEmpty()) {
-                    SwingUtilities.invokeLater { appendAnsi(tab.textPane, "\n✓ Tüm senaryolar geçti!\n") }
-                    break
-                }
-
-                currentScenarios = failedScenarios
-
-                if (attempt == maxRetries) {
-                    SwingUtilities.invokeLater {
-                        appendAnsi(tab.textPane, "\n✗ ${failedScenarios.size} senaryo $maxRetries retry sonrası hâlâ fail:\n")
-                        failedScenarios.forEach { appendAnsi(tab.textPane, "  - ${it.name}\n") }
-                    }
-                }
-            }
-
-            SwingUtilities.invokeLater {
-                tab.markFinished(if (currentScenarios.isEmpty()) 0 else 1)
-                retryRunning = false
-            }
-        }.start()
     }
 }

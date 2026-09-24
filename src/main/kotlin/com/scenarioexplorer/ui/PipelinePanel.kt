@@ -35,27 +35,33 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     private val pipelines = mutableListOf<PipelineDefinition>()
     private var activePipelineIndex = -1
 
-    private val runQueue = ConcurrentLinkedQueue<PipelineRunItem>()
-    private val activeHandles = Collections.synchronizedList(mutableListOf<RunHandle>())
-    private val running = AtomicBoolean(false)
-    private val activeCount = AtomicInteger(0)
-    private val cancelled = AtomicBoolean(false)
-    private var sharedTargetDir: java.io.File? = null
+    // One independent run per pipeline — several pipelines can run at the same time
+    private val runs = mutableListOf<PipelineRun>()
+    private var onListPage = true
+
+    /** Fired when a pipeline run finishes/stops so reports can be re-read. */
+    var onRunFinished: (() -> Unit)? = null
 
     private val maxParallelSpinner = JSpinner(SpinnerNumberModel(5, 1, 20, 1))
-    private val startDelaySpinner = JSpinner(SpinnerNumberModel(30, 0, 600, 5))
-    private val nextDelaySpinner = JSpinner(SpinnerNumberModel(120, 0, 600, 10))
-    private val chunkSizeSpinner = JSpinner(SpinnerNumberModel(5, 1, 50, 1))
-
-    // Auto-retry ayarları
-    private val autoRetryCountSpinner = JSpinner(SpinnerNumberModel(0, 0, 10, 1))
-    private val autoRetryDelaySpin = JSpinner(SpinnerNumberModel(120, 0, 600, 10))
-    private var autoRetryRemaining = 0
+    private val startDelaySpinner = JSpinner(SpinnerNumberModel(5, 0, 600, 5))
+    private val nextDelaySpinner = JSpinner(SpinnerNumberModel(5, 0, 600, 5))
+    private val chunkSizeSpinner = JSpinner(SpinnerNumberModel(1, 1, 50, 1))
 
     private val sourceListModel = DefaultListModel<FeatureSourceItem>()
     private val sourceList = JBList(sourceListModel)
 
-    private val pipelineCombo = JComboBox<String>()
+    // Two-page layout: "list" (all pipelines) and "detail" (one pipeline's contents + run)
+    private val pagesLayout = CardLayout()
+    private val pages = JPanel(pagesLayout)
+    private val pipelineCardsPanel = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        border = JBUI.Borders.empty(8, 12)
+    }
+    private val backButton = JButton("← Pipeline'lar")
+    private val detailTitleLabel = JBLabel().apply { font = font.deriveFont(Font.BOLD, 15f) }
+    private val runCardsLayout = CardLayout()
+    private val runCards = JPanel(runCardsLayout)
+
     private val pipelineItemsModel = DefaultListModel<PipelineEntry>()
     private val pipelineItemsList = JBList(pipelineItemsModel)
 
@@ -67,14 +73,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         isStringPainted = true; string = "Hazır"
         preferredSize = Dimension(Int.MAX_VALUE, 24)
     }
-    private val logArea = JTextArea().apply {
-        isEditable = false
-        font = Font("JetBrains Mono", Font.PLAIN, 11).let { f ->
-            if (f.family == "JetBrains Mono") f else Font("Monospaced", Font.PLAIN, 11)
-        }
-        background = UIUtil.getPanelBackground()
-        border = JBUI.Borders.empty(4)
-    }
     // Single output view — switches between pipeline log and per-feature output
     private val outputScrollPane = JBScrollPane().apply { border = JBUI.Borders.empty() }
     private val outputTitleLabel = JBLabel("📋 Pipeline Log").apply {
@@ -82,9 +80,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private val addPipelineBtn = JButton("+ Pipeline Oluştur")
-    private val renamePipelineBtn = JButton("✎")
-    private val deletePipelineBtn = JButton("🗑")
-    private val addToPipelineBtn = JButton("→ Feature Ekle")
     private val addScenariosToPipelineBtn = JButton("→ Senaryo Ekle")
     private val removeFromPipelineBtn = JButton("✗ Çıkar")
     private val moveUpBtn = JButton("▲")
@@ -92,8 +87,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     private val startButton = JButton("▶ Pipeline Başlat", AllIcons.Actions.Execute)
     private val stopButton = JButton("⏹ Durdur", AllIcons.Actions.Suspend).apply { isEnabled = false }
     private val retryFailedButton = JButton("🔄 Fail Tekrar").apply { isEnabled = false }
-
-    private val pipelineRunItems = mutableListOf<PipelineRunItem>()
 
     // === Data classes ===
 
@@ -125,6 +118,29 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     )
 
+    /** All state of one pipeline's run: its items, queue, process handles, log and captured settings. */
+    private class PipelineRun(val pipeline: PipelineDefinition) {
+        val items = mutableListOf<PipelineRunItem>()
+        val queue = ConcurrentLinkedQueue<PipelineRunItem>()
+        val handles: MutableList<RunHandle> = Collections.synchronizedList(mutableListOf())
+        val running = AtomicBoolean(false)
+        val cancelled = AtomicBoolean(false)
+        val activeCount = AtomicInteger(0)
+        @Volatile var sharedTarget: java.io.File? = null
+        @Volatile var maxParallel = 5
+        @Volatile var startDelaySec = 5
+        @Volatile var nextDelaySec = 5
+        var viewedItem: PipelineRunItem? = null // which output is shown in the detail page (null = log)
+        val logArea = JTextArea().apply {
+            isEditable = false
+            font = Font("JetBrains Mono", Font.PLAIN, 11).let { f ->
+                if (f.family == "JetBrains Mono") f else Font("Monospaced", Font.PLAIN, 11)
+            }
+            background = UIUtil.getPanelBackground()
+            border = JBUI.Borders.empty(4)
+        }
+    }
+
     init {
         background = UIConstants.surfaceBackground()
         sourceList.cellRenderer = FeatureSourceRenderer()
@@ -140,6 +156,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         wireActions()
         loadPipelines()
         restorePipelineState()
+        refreshPipelineList()
     }
 
     private fun buildUI() {
@@ -151,18 +168,10 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         }, BorderLayout.NORTH)
         leftPanel.add(JBScrollPane(sourceList).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
         leftPanel.add(JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
-            add(addToPipelineBtn.apply { toolTipText = "Seçili feature'ları tüm senaryolarıyla pipeline'a ekle" })
             add(addScenariosToPipelineBtn.apply { toolTipText = "Seçili feature'lardan senaryo seçerek pipeline'a ekle" })
         }, BorderLayout.SOUTH)
 
         val rightPanel = JPanel(BorderLayout()).apply { border = JBUI.Borders.empty(4) }
-        val pipelineBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
-            add(JBLabel("Pipeline:").apply { font = font.deriveFont(Font.BOLD) })
-            add(pipelineCombo.apply { preferredSize = Dimension(200, 28) })
-            add(addPipelineBtn)
-            add(renamePipelineBtn.apply { toolTipText = "Yeniden adlandır"; preferredSize = Dimension(40, 28) })
-            add(deletePipelineBtn.apply { toolTipText = "Pipeline sil"; preferredSize = Dimension(40, 28) })
-        }
         val itemsPanel = JPanel(BorderLayout())
         itemsPanel.add(JBScrollPane(pipelineItemsList).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
         itemsPanel.add(JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
@@ -172,7 +181,10 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             add(removeFromPipelineBtn.apply { toolTipText = "Pipeline'dan çıkar" })
         }, BorderLayout.SOUTH)
         val pipelineContentPanel = JPanel(BorderLayout()).apply {
-            add(pipelineBar, BorderLayout.NORTH); add(itemsPanel, BorderLayout.CENTER)
+            add(JBLabel("Pipeline İçeriği").apply {
+                font = font.deriveFont(Font.BOLD, 13f); border = JBUI.Borders.empty(4, 8)
+            }, BorderLayout.NORTH)
+            add(itemsPanel, BorderLayout.CENTER)
         }
 
         val statusScroll = JBScrollPane(statusPanel,
@@ -184,18 +196,27 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             minimumSize = Dimension(0, 110)
         }
         // Output panel: title + scrollable output area
-        showOutputFor(null) // show pipeline log by default
         val outputPanel = JPanel(BorderLayout()).apply {
             add(outputTitleLabel, BorderLayout.NORTH)
             add(outputScrollPane, BorderLayout.CENTER)
         }
 
+        // Run status + output only show for the pipeline that owns the current run state
+        runCards.add(JPanel(BorderLayout()).apply {
+            add(statusScroll, BorderLayout.NORTH)
+            add(outputPanel, BorderLayout.CENTER)
+        }, "run")
+        runCards.add(JPanel(GridBagLayout()).apply {
+            add(JBLabel("<html><div style='text-align:center'>Bu pipeline henüz koşulmadı<br>" +
+                "Alttaki \"▶ Pipeline Başlat\" ile koşabilirsin</div></html>").apply {
+                foreground = UIUtil.getLabelDisabledForeground()
+            })
+        }, "idle")
+        runCardsLayout.show(runCards, "idle")
+
         val rightSplitter = com.intellij.ui.JBSplitter(true, 0.45f).apply {
             firstComponent = pipelineContentPanel
-            secondComponent = JPanel(BorderLayout()).apply {
-                add(statusScroll, BorderLayout.NORTH)
-                add(outputPanel, BorderLayout.CENTER)
-            }
+            secondComponent = runCards
             dividerWidth = 6
         }
         rightPanel.add(rightSplitter, BorderLayout.CENTER)
@@ -209,9 +230,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             add(Box.createHorizontalStrut(6))
             add(JBLabel("Biten Sonrası (sn):")); add(nextDelaySpinner.apply { preferredSize = Dimension(60, 28) })
             add(Box.createHorizontalStrut(12))
-            add(JBLabel("Auto Retry:")); add(autoRetryCountSpinner.apply { preferredSize = Dimension(50, 28); toolTipText = "Pipeline bittikten sonra fail'ları kaç kez otomatik tekrar koşsun (0=kapalı)" })
-            add(JBLabel("Retry Bekleme (sn):")); add(autoRetryDelaySpin.apply { preferredSize = Dimension(60, 28); toolTipText = "Her retry öncesi bekleme süresi" })
-            add(Box.createHorizontalStrut(12))
             add(startButton); add(stopButton); add(retryFailedButton)
         }
         val bottomPanel = JPanel(BorderLayout()).apply {
@@ -221,31 +239,54 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         val mainSplitter = com.intellij.ui.JBSplitter(false, 0.30f).apply {
             firstComponent = leftPanel; secondComponent = rightPanel; dividerWidth = 8
         }
-        add(mainSplitter, BorderLayout.CENTER)
-        add(bottomPanel, BorderLayout.SOUTH)
+
+        // Page 2: pipeline detail
+        val detailHeader = JPanel(BorderLayout(10, 0)).apply {
+            border = JBUI.Borders.empty(6, 8)
+            add(backButton.apply { isFocusPainted = false }, BorderLayout.WEST)
+            add(detailTitleLabel, BorderLayout.CENTER)
+        }
+        val detailPage = JPanel(BorderLayout()).apply {
+            add(detailHeader, BorderLayout.NORTH)
+            add(mainSplitter, BorderLayout.CENTER)
+            add(bottomPanel, BorderLayout.SOUTH)
+        }
+
+        // Page 1: pipeline list
+        val listHeader = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.empty(10, 16, 4, 16)
+            add(JBLabel("Pipeline'lar").apply { font = font.deriveFont(Font.BOLD, 16f) }, BorderLayout.WEST)
+            add(addPipelineBtn.apply { isFocusPainted = false }, BorderLayout.EAST)
+        }
+        val listPage = JPanel(BorderLayout()).apply {
+            add(listHeader, BorderLayout.NORTH)
+            add(JPanel(BorderLayout()).apply {
+                add(pipelineCardsPanel, BorderLayout.NORTH)
+            }.let { JBScrollPane(it).apply { border = JBUI.Borders.empty() } }, BorderLayout.CENTER)
+        }
+
+        pages.add(listPage, "list")
+        pages.add(detailPage, "detail")
+        pagesLayout.show(pages, "list")
+        add(pages, BorderLayout.CENTER)
     }
 
     private fun wireActions() {
         addPipelineBtn.addActionListener { createNewPipeline() }
-        renamePipelineBtn.addActionListener { renamePipeline() }
-        deletePipelineBtn.addActionListener { deletePipeline() }
-        addToPipelineBtn.addActionListener { addSelectedToPipeline() }
+        backButton.addActionListener { showListPage() }
         addScenariosToPipelineBtn.addActionListener { addScenariosToPipeline() }
         removeFromPipelineBtn.addActionListener { removeSelectedFromPipeline() }
         moveUpBtn.addActionListener { moveSelectedItems(-1) }
         moveDownBtn.addActionListener { moveSelectedItems(1) }
         startButton.addActionListener { startPipeline() }
-        stopButton.addActionListener { stopPipeline() }
-        retryFailedButton.addActionListener { retryFailed() }
-        pipelineCombo.addActionListener {
-            val idx = pipelineCombo.selectedIndex
-            if (idx >= 0 && idx < pipelines.size) { activePipelineIndex = idx; refreshPipelineItems() }
-        }
+        stopButton.addActionListener { viewedRun()?.let { stopPipeline(it) } }
+        retryFailedButton.addActionListener { viewedRun()?.let { retryFailed(it) } }
     }
 
     fun update(files: List<ScenarioFile>, reports: Map<String, ReportEntry>) {
         allFiles = files; latestReports = reports
-        if (!running.get()) rebuildSourceList()
+        if (!anyRunning()) rebuildSourceList()
+        refreshPipelineList()
     }
 
     private fun rebuildSourceList() {
@@ -262,39 +303,221 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     // === PIPELINE CRUD ===
 
     private fun createNewPipeline() {
-        val name = JOptionPane.showInputDialog(this, "Pipeline adı:", "Yeni Pipeline", JOptionPane.PLAIN_MESSAGE)
+        val name = JOptionPane.showInputDialog(this, "Pipeline adı:", "Yeni Pipeline", JOptionPane.PLAIN_MESSAGE)?.trim()
         if (name.isNullOrBlank()) return
-        pipelines.add(PipelineDefinition(name.trim()))
-        refreshPipelineCombo()
-        pipelineCombo.selectedIndex = pipelines.size - 1
-        savePipelines()
+        if (nameTaken(name, null)) { warnNameTaken(); return }
+        pipelines.add(PipelineDefinition(name))
+        refreshPipelines(); savePipelines()
     }
 
-    private fun renamePipeline() {
-        val p = getActivePipeline() ?: return
-        val name = JOptionPane.showInputDialog(this, "Yeni ad:", "Pipeline Adını Değiştir", JOptionPane.PLAIN_MESSAGE, null, null, p.name) as? String
-        if (name.isNullOrBlank()) return
-        p.name = name.trim(); refreshPipelineCombo(); savePipelines()
+    private fun renamePipeline(p: PipelineDefinition) {
+        val name = (JOptionPane.showInputDialog(this, "Yeni ad:", "Pipeline Adını Değiştir", JOptionPane.PLAIN_MESSAGE, null, null, p.name) as? String)?.trim()
+        if (name.isNullOrBlank() || name == p.name) return
+        if (nameTaken(name, p)) { warnNameTaken(); return }
+        // Saved run state is keyed by the name — move it along with the rename
+        val oldKey = keyFor(p)
+        p.name = name
+        PipelineStateManager.clear(project, oldKey)
+        runFor(p)?.let { persistRun(it) }
+        refreshPipelines(); savePipelines()
     }
 
-    private fun deletePipeline() {
-        val p = getActivePipeline() ?: return
+    private fun deletePipeline(p: PipelineDefinition) {
         if (JOptionPane.showConfirmDialog(this, "'${p.name}' silinsin mi?", "Pipeline Sil", JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return
-        pipelines.removeAt(activePipelineIndex)
-        activePipelineIndex = if (pipelines.isNotEmpty()) 0 else -1
-        refreshPipelineCombo(); savePipelines()
+        runFor(p)?.let { runs.remove(it) }
+        PipelineStateManager.clear(project, keyFor(p))
+        pipelines.remove(p)
+        activePipelineIndex = -1
+        refreshPipelines(); savePipelines()
     }
 
+    private fun nameTaken(name: String, except: PipelineDefinition?): Boolean =
+        pipelines.any { it !== except && it.name.equals(name, ignoreCase = true) }
+
+    private fun warnNameTaken() {
+        JOptionPane.showMessageDialog(this, "Bu isimde bir pipeline zaten var.", "Pipeline", JOptionPane.WARNING_MESSAGE)
+    }
+
+    /** The pipeline currently opened on the detail page (or last opened), if any. */
     private fun getActivePipeline(): PipelineDefinition? {
         if (activePipelineIndex < 0 || activePipelineIndex >= pipelines.size) return null
         return pipelines[activePipelineIndex]
     }
 
-    private fun refreshPipelineCombo() {
-        pipelineCombo.removeAllItems()
-        for (p in pipelines) pipelineCombo.addItem("${p.name}  (${p.items.size})")
-        if (activePipelineIndex in pipelines.indices) pipelineCombo.selectedIndex = activePipelineIndex
+    private fun refreshPipelines() {
+        refreshPipelineList()
         refreshPipelineItems()
+    }
+
+    // === RUN LOOKUP ===
+
+    /** Stable key for a pipeline's saved run state (names are unique). */
+    private fun keyFor(p: PipelineDefinition): String {
+        val slug = p.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "pipeline" }.take(40)
+        return "${slug}_${Integer.toHexString(p.name.hashCode())}"
+    }
+
+    private fun runFor(p: PipelineDefinition?): PipelineRun? = if (p == null) null else runs.firstOrNull { it.pipeline === p }
+
+    private fun viewedRun(): PipelineRun? = runFor(getActivePipeline())
+
+    private fun anyRunning(): Boolean = runs.any { it.running.get() }
+
+    // === PAGES ===
+
+    private fun openPipeline(p: PipelineDefinition) {
+        activePipelineIndex = pipelines.indexOf(p)
+        onListPage = false
+        detailTitleLabel.text = p.name
+        refreshPipelineItems()
+        showRunAreaFor(p)
+        refreshDetailButtons()
+        pagesLayout.show(pages, "detail")
+    }
+
+    private fun showListPage() {
+        onListPage = true
+        refreshPipelineList()
+        pagesLayout.show(pages, "list")
+    }
+
+    /** Run status/output/progress belong to one pipeline's run — show them for the pipeline being viewed. */
+    private fun showRunAreaFor(p: PipelineDefinition?) {
+        val run = runFor(p)
+        runCardsLayout.show(runCards, if (run != null) "run" else "idle")
+        progressBar.isVisible = run != null
+        if (run != null) {
+            rebuildStatusPanel(run)
+            updateProgressBar(run)
+            showOutputFor(run, run.viewedItem)
+        }
+    }
+
+    private fun refreshDetailButtons() {
+        val run = viewedRun()
+        val isRunning = run?.running?.get() == true
+        startButton.isEnabled = !isRunning
+        stopButton.isEnabled = isRunning
+        retryFailedButton.isEnabled = run != null && !isRunning &&
+            run.items.any { it.status == RunItemStatus.FAILED || it.status == RunItemStatus.CANCELLED }
+    }
+
+    /** Called on the EDT whenever a run's state changes: persist it and refresh whatever is showing it. */
+    private fun runChanged(run: PipelineRun) {
+        persistRun(run)
+        if (!onListPage && run === viewedRun()) { rebuildStatusPanel(run); updateProgressBar(run) }
+        refreshDetailButtons()
+        refreshPipelineList()
+    }
+
+    private fun refreshPipelineList() {
+        if (!onListPage) return
+        pipelineCardsPanel.removeAll()
+        if (pipelines.isEmpty()) {
+            pipelineCardsPanel.add(JBLabel("Henüz pipeline yok. Sağ üstteki \"+ Pipeline Oluştur\" ile başla.").apply {
+                foreground = UIUtil.getLabelDisabledForeground()
+                alignmentX = Component.LEFT_ALIGNMENT
+                border = JBUI.Borders.empty(16, 4)
+            })
+        }
+        for (p in pipelines) {
+            pipelineCardsPanel.add(buildPipelineCard(p))
+            pipelineCardsPanel.add(Box.createVerticalStrut(8))
+        }
+        pipelineCardsPanel.revalidate(); pipelineCardsPanel.repaint()
+    }
+
+    private fun scenarioNamesOf(p: PipelineDefinition): Set<String> = p.items.flatMap { e ->
+        if (e.isScenarioLevel) e.scenarioNames
+        else allFiles.find { it.file.path == e.featurePath }?.scenarios?.map { it.name } ?: emptyList()
+    }.toSet()
+
+    private fun buildPipelineCard(p: PipelineDefinition): JComponent {
+        val names = scenarioNamesOf(p)
+        val run = runFor(p)
+        val isRunning = run?.running?.get() == true
+
+        // While a run is active, finished items override the (older) report status so the counts move live
+        val live: Map<String, Boolean> = if (run != null && isRunning) {
+            run.items
+                .filter { it.status == RunItemStatus.PASSED || it.status == RunItemStatus.FAILED }
+                .flatMap { item -> item.scenarios.map { it.name to (item.status == RunItemStatus.PASSED) } }
+                .toMap()
+        } else emptyMap()
+        var passed = 0; var failed = 0; var notRun = 0
+        for (n in names) {
+            val ok: Boolean? = live[n] ?: when (latestReports[n]?.status) {
+                StepStatus.PASSED -> true
+                StepStatus.FAILED -> false
+                else -> null
+            }
+            when (ok) { true -> passed++; false -> failed++; null -> notRun++ }
+        }
+
+        val runLine = if (run != null && isRunning) {
+            val done = run.items.count { it.status != RunItemStatus.WAITING && it.status != RunItemStatus.RUNNING }
+            val active = run.items.count { it.status == RunItemStatus.RUNNING }
+            "▶ Çalışıyor  $done/${run.items.size} tamamlandı • $active koşuyor"
+        } else null
+
+        val counts = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+            fun chip(text: String, color: Color) {
+                add(JBLabel(text).apply { foreground = color; font = font.deriveFont(Font.BOLD, 12f) })
+            }
+            chip("✓ $passed", UIConstants.GREEN); add(Box.createHorizontalStrut(14))
+            chip("✗ $failed", UIConstants.RED); add(Box.createHorizontalStrut(14))
+            chip("○ $notRun", UIConstants.GRAY)
+        }
+
+        val info = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(JBLabel(p.name).apply { font = font.deriveFont(Font.BOLD, 14f); alignmentX = Component.LEFT_ALIGNMENT })
+            add(Box.createVerticalStrut(2))
+            add(JBLabel("${p.items.size} kayıt • ${names.size} senaryo").apply {
+                foreground = UIUtil.getLabelDisabledForeground(); font = font.deriveFont(11f); alignmentX = Component.LEFT_ALIGNMENT
+            })
+            add(Box.createVerticalStrut(4))
+            add(counts)
+            if (runLine != null) {
+                add(Box.createVerticalStrut(4))
+                add(JBLabel(runLine).apply {
+                    foreground = UIConstants.BLUE; font = font.deriveFont(Font.BOLD, 11f); alignmentX = Component.LEFT_ALIGNMENT
+                })
+            }
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+            isOpaque = false
+            add(JButton("Aç").apply { isFocusPainted = false; addActionListener { openPipeline(p) } })
+            add(JButton("✎").apply {
+                toolTipText = "Yeniden adlandır"; isFocusPainted = false
+                addActionListener { renamePipeline(p) }
+            })
+            add(JButton("🗑").apply {
+                toolTipText = if (isRunning) "Çalışırken silinemez" else "Pipeline sil"
+                isFocusPainted = false; isEnabled = !isRunning
+                addActionListener { deletePipeline(p) }
+            })
+        }
+        return RoundedPanel(UIConstants.CARD_ARC).apply {
+            layout = BorderLayout(12, 0)
+            background = UIConstants.cardBackground()
+            border = BorderFactory.createCompoundBorder(
+                RoundedBorder(UIConstants.CARD_ARC, UIConstants.subtleBorder()),
+                JBUI.Borders.empty(12, 16)
+            )
+            alignmentX = Component.LEFT_ALIGNMENT
+            maximumSize = Dimension(Int.MAX_VALUE, 120)
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            add(info, BorderLayout.CENTER)
+            add(actions, BorderLayout.EAST)
+            addMouseListener(object : java.awt.event.MouseAdapter() {
+                override fun mouseClicked(e: java.awt.event.MouseEvent) { openPipeline(p) }
+            })
+        }
     }
 
     private fun refreshPipelineItems() {
@@ -304,19 +527,6 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     // === ADD / REMOVE / REORDER ===
-
-    private fun addSelectedToPipeline() {
-        val pipeline = getActivePipeline() ?: run {
-            JOptionPane.showMessageDialog(this, "Önce bir pipeline oluşturun.", "Pipeline Yok", JOptionPane.WARNING_MESSAGE); return
-        }
-        val selected = sourceList.selectedValuesList
-        if (selected.isEmpty()) return
-        for (item in selected) {
-            val entry = PipelineEntry(featurePath = item.sf.file.path, featureName = item.sf.featureName)
-            if (pipeline.items.none { it.key == entry.key }) pipeline.items.add(entry)
-        }
-        refreshPipelineCombo(); savePipelines()
-    }
 
     private fun addScenariosToPipeline() {
         val pipeline = getActivePipeline() ?: run {
@@ -387,13 +597,24 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             val entry = PipelineEntry(featurePath = featurePath, featureName = sf.featureName, scenarioNames = scenarioNames)
             if (pipeline.items.none { it.key == entry.key }) pipeline.items.add(entry)
         }
-        refreshPipelineCombo(); savePipelines()
+        refreshPipelines(); savePipelines()
     }
 
-    /** Resolves scenario names (e.g. from the Errors tab) to their features and adds them to the active pipeline. Returns true on success. */
-    fun addScenarioNamesToActivePipeline(scenarioNames: List<String>): Boolean {
-        val pipeline = getActivePipeline() ?: run {
-            JOptionPane.showMessageDialog(this, "Önce bir pipeline oluşturun.", "Pipeline Yok", JOptionPane.WARNING_MESSAGE); return false
+    /** Resolves scenario names (e.g. from the Errors tab) to their features and adds them to a pipeline the user picks. Returns true on success. */
+    fun addScenarioNamesToPipeline(scenarioNames: List<String>): Boolean {
+        val pipeline = when (pipelines.size) {
+            0 -> {
+                JOptionPane.showMessageDialog(this, "Önce Pipeline sekmesinden bir pipeline oluşturun.", "Pipeline Yok", JOptionPane.WARNING_MESSAGE)
+                return false
+            }
+            1 -> pipelines[0]
+            else -> {
+                val options = pipelines.mapIndexed { i, p -> "${i + 1}. ${p.name}  (${p.items.size})" }.toTypedArray()
+                val initial = options[activePipelineIndex.coerceIn(0, options.size - 1)]
+                val chosen = JOptionPane.showInputDialog(this, "Hangi pipeline'a eklensin?", "Pipeline Seç",
+                    JOptionPane.QUESTION_MESSAGE, null, options, initial) as? String ?: return false
+                pipelines[options.indexOf(chosen)]
+            }
         }
         val nameSet = scenarioNames.toSet()
         val matchedByFeature = allFiles.mapNotNull { sf ->
@@ -407,7 +628,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             val entry = PipelineEntry(featurePath = sf.file.path, featureName = sf.featureName, scenarioNames = scenarios.map { it.name })
             if (pipeline.items.none { it.key == entry.key }) pipeline.items.add(entry)
         }
-        refreshPipelineCombo(); savePipelines()
+        refreshPipelines(); savePipelines()
         return true
     }
 
@@ -416,7 +637,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         for (idx in pipelineItemsList.selectedIndices.sortedDescending()) {
             if (idx in pipeline.items.indices) pipeline.items.removeAt(idx)
         }
-        refreshPipelineCombo(); savePipelines()
+        refreshPipelines(); savePipelines()
     }
 
     private fun moveSelectedItems(direction: Int) {
@@ -438,12 +659,23 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun startPipeline() {
         val pipeline = getActivePipeline() ?: return
-        if (pipeline.items.isEmpty()) { log("Pipeline boş."); return }
+        if (pipeline.items.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Pipeline boş. Önce soldan senaryo ekleyin.", "Pipeline Boş", JOptionPane.INFORMATION_MESSAGE)
+            return
+        }
+        if (runFor(pipeline)?.running?.get() == true) return
 
-        running.set(true); cancelled.set(false); activeCount.set(0)
-        pipelineRunItems.clear(); activeHandles.clear()
-        autoRetryRemaining = autoRetryCountSpinner.value as Int
-        PipelineStateManager.clearOutputs(project)
+        // A finished run of this pipeline is replaced by the new one
+        runFor(pipeline)?.let { runs.remove(it) }
+        PipelineStateManager.clear(project, keyFor(pipeline))
+
+        val run = PipelineRun(pipeline)
+        runs.add(run)
+        run.running.set(true)
+        run.maxParallel = maxParallelSpinner.value as Int
+        run.startDelaySec = startDelaySpinner.value as Int
+        run.nextDelaySec = nextDelaySpinner.value as Int
+        showRunAreaFor(pipeline)
 
         // Senaryo bazlı entry'leri ve feature bazlı entry'leri ayır
         val scenarioPool = mutableListOf<Pair<ScenarioFile, Scenario>>() // havuz: tüm senaryo bazlı senaryolar
@@ -451,11 +683,11 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
         for (entry in pipeline.items) {
             val sf = allFiles.find { it.file.path == entry.featurePath }
-            if (sf == null) { log("⚠ Bulunamadı: ${entry.featureName}"); continue }
+            if (sf == null) { log(run, "⚠ Bulunamadı: ${entry.featureName}"); continue }
 
             if (entry.isScenarioLevel) {
                 val selectedScenarios = sf.scenarios.filter { it.name in entry.scenarioNames }
-                if (selectedScenarios.isEmpty()) { log("⚠ Senaryo bulunamadı: ${entry.featureName}"); continue }
+                if (selectedScenarios.isEmpty()) { log(run, "⚠ Senaryo bulunamadı: ${entry.featureName}"); continue }
                 for (s in selectedScenarios) scenarioPool.add(sf to s)
             } else {
                 featureEntries.add(entry to sf)
@@ -474,37 +706,40 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                 val primarySf = chunk.first().first
                 val scenarioNames = scenarios.map { it.name }
                 val chunkEntry = PipelineEntry(primarySf.file.path, chunkName, scenarioNames)
-                pipelineRunItems.add(PipelineRunItem(chunkEntry, primarySf, scenarios))
+                run.items.add(PipelineRunItem(chunkEntry, primarySf, scenarios))
             }
         }
 
         // Feature bazlı entry'leri olduğu gibi ekle
         for ((entry, sf) in featureEntries) {
-            pipelineRunItems.add(PipelineRunItem(entry, sf, sf.scenarios))
+            run.items.add(PipelineRunItem(entry, sf, sf.scenarios))
         }
-        if (pipelineRunItems.isEmpty()) { log("Çalıştırılacak feature bulunamadı."); running.set(false); return }
+        if (run.items.isEmpty()) {
+            log(run, "Çalıştırılacak feature bulunamadı.")
+            run.running.set(false); runChanged(run)
+            return
+        }
 
-        runQueue.clear(); runQueue.addAll(pipelineRunItems)
+        run.queue.addAll(run.items)
 
         // Reset output areas
-        for (item in pipelineRunItems) {
+        for (item in run.items) {
             item.outputArea.text = ""; item.outputArea.background = UIUtil.getPanelBackground()
         }
-        showOutputFor(null) // start with pipeline log view
+        showOutputFor(run, null) // start with pipeline log view
 
-        setRunningUI(true); refreshStatusPanel(); updateProgress()
-        log("Pipeline '${pipeline.name}' başlatıldı: ${pipelineRunItems.size} feature, max ${maxParallelSpinner.value} paralel")
+        runChanged(run)
+        log(run, "Pipeline '${pipeline.name}' başlatıldı: ${run.items.size} feature, max ${run.maxParallel} paralel")
 
         // Shared target: compile once, then run all features against it
         Thread {
-            sharedTargetDir = ScenarioRunner.createIsolatedTargetDir(project.basePath!!, "pipeline")
-            log("🔨 Ortak target oluşturuluyor ve compile ediliyor...")
-
             val basePath = project.basePath ?: return@Thread
+            val sharedTarget = ScenarioRunner.createIsolatedTargetDir(basePath, "pipeline")
+            run.sharedTarget = sharedTarget
+            log(run, "🔨 Ortak target oluşturuluyor ve compile ediliyor...")
+
             val settings = ScenarioExplorerSettings.getInstance(project).state
-            val mvnExe = if (java.io.File(basePath, "mvnw").exists()) "./mvnw"
-                         else if (java.io.File(basePath, "mvnw.cmd").exists()) "mvnw.cmd"
-                         else "mvn"
+            val mvnExe = ScenarioRunner.resolveMvnExecutable(basePath)
 
             if (settings.buildBeforeRun) {
                 val compileLatch = java.util.concurrent.CountDownLatch(1)
@@ -512,14 +747,14 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                 val cmd = com.intellij.execution.configurations.GeneralCommandLine().apply {
                     workDirectory = java.io.File(basePath)
                     exePath = mvnExe
-                    addParameters("clean", "compile", "test-compile")
-                    addParameter("-Dmaven.build.dir=${sharedTargetDir!!.absolutePath}")
+                    addParameters("compile", "test-compile")
+                    addParameters(ScenarioRunner.isolatedBuildParams(sharedTarget))
                 }
                 try {
                     val handler = com.intellij.execution.process.OSProcessHandler(cmd)
                     handler.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
                         override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
-                            SwingUtilities.invokeLater { log(event.text.trimEnd()) }
+                            SwingUtilities.invokeLater { log(run, event.text.trimEnd()) }
                         }
                         override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
                             compileOk = event.exitCode == 0
@@ -528,53 +763,54 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                     })
                     handler.startNotify()
                 } catch (e: Exception) {
-                    log("✗ Compile hatası: ${e.message}")
+                    log(run, "✗ Compile hatası: ${e.message}")
                     compileLatch.countDown()
                 }
                 compileLatch.await()
 
-                if (!compileOk || cancelled.get()) {
-                    log("✗ Compile başarısız, pipeline iptal ediliyor.")
+                if (!compileOk || run.cancelled.get()) {
+                    log(run, "✗ Compile başarısız, pipeline iptal ediliyor.")
                     SwingUtilities.invokeLater {
-                        pipelineRunItems.forEach { it.status = RunItemStatus.CANCELLED }
-                        running.set(false); setRunningUI(false); refreshStatusPanel(); updateProgress()
+                        run.items.forEach { it.status = RunItemStatus.CANCELLED }
+                        run.running.set(false); runChanged(run)
+                        onRunFinished?.invoke()
                     }
-                    cleanupSharedTarget()
+                    cleanupSharedTarget(run)
                     return@Thread
                 }
-                log("✓ Compile tamamlandı, feature'lar koşuluyor...")
+                log(run, "✓ Compile tamamlandı, feature'lar koşuluyor...")
             }
 
-            feedQueue()
-            // Cleanup after pipeline finishes
-            cleanupSharedTarget()
+            // The shared target is cleaned up when the run completes (see checkPipelineComplete),
+            // not here — feedQueue returns as soon as the last item has been launched.
+            feedQueue(run)
         }.start()
     }
 
-    private fun feedQueue() {
-        val maxParallel = maxParallelSpinner.value as Int
-        val startDelaySec = startDelaySpinner.value as Int
-        val nextDelaySec = nextDelaySpinner.value as Int
+    private fun feedQueue(run: PipelineRun) {
+        val maxParallel = run.maxParallel
+        val startDelaySec = run.startDelaySec
+        val nextDelaySec = run.nextDelaySec
         var launched = 0
 
-        while (runQueue.isNotEmpty() && !cancelled.get()) {
-            if (activeCount.get() >= maxParallel) { Thread.sleep(1000); continue }
-            val item = runQueue.poll() ?: break
-            if (cancelled.get()) { item.status = RunItemStatus.CANCELLED; SwingUtilities.invokeLater { refreshStatusPanel(); updateProgress() }; break }
+        while (run.queue.isNotEmpty() && !run.cancelled.get()) {
+            if (run.activeCount.get() >= maxParallel) { Thread.sleep(1000); continue }
+            val item = run.queue.poll() ?: break
+            if (run.cancelled.get()) { item.status = RunItemStatus.CANCELLED; SwingUtilities.invokeLater { runChanged(run) }; break }
 
             val isInitial = launched < maxParallel
             val delaySec = if (isInitial) startDelaySec else nextDelaySec
             if (launched > 0 && delaySec > 0) {
-                log("⏳ ${delaySec}sn bekleniyor...")
-                for (i in 0 until delaySec) { if (cancelled.get()) break; Thread.sleep(1000) }
-                if (cancelled.get()) { item.status = RunItemStatus.CANCELLED; SwingUtilities.invokeLater { refreshStatusPanel(); updateProgress() }; break }
+                log(run, "⏳ ${delaySec}sn bekleniyor...")
+                for (i in 0 until delaySec) { if (run.cancelled.get()) break; Thread.sleep(1000) }
+                if (run.cancelled.get()) { item.status = RunItemStatus.CANCELLED; SwingUtilities.invokeLater { runChanged(run) }; break }
             }
 
-            launched++; activeCount.incrementAndGet()
+            launched++; run.activeCount.incrementAndGet()
             item.status = RunItemStatus.RUNNING
-            SwingUtilities.invokeLater { refreshStatusPanel(); updateProgress() }
+            SwingUtilities.invokeLater { runChanged(run) }
             val startTime = System.currentTimeMillis()
-            log("▶ Başlatılıyor: ${item.entry.featureName}")
+            log(run, "▶ Başlatılıyor: ${item.entry.featureName}")
 
             Thread {
                 try {
@@ -584,36 +820,37 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                             item.duration = System.currentTimeMillis() - startTime
                             SwingUtilities.invokeLater {
                                 item.status = if (exitCode == 0) RunItemStatus.PASSED else RunItemStatus.FAILED
-                                log(if (exitCode == 0) "✓ Tamamlandı: ${item.entry.featureName} (${formatDuration(item.duration)})" else "✗ Fail: ${item.entry.featureName} (exit: $exitCode, ${formatDuration(item.duration)})")
-                                activeCount.decrementAndGet(); refreshStatusPanel(); updateProgress(); checkPipelineComplete()
+                                log(run, if (exitCode == 0) "✓ Tamamlandı: ${item.entry.featureName} (${formatDuration(item.duration)})" else "✗ Fail: ${item.entry.featureName} (exit: $exitCode, ${formatDuration(item.duration)})")
+                                run.activeCount.decrementAndGet(); runChanged(run); checkPipelineComplete(run)
                             }
                         },
-                        sharedTargetDir = sharedTargetDir
+                        sharedTargetDir = run.sharedTarget
                     )
                     item.handle = handle
-                    if (handle != null) synchronized(activeHandles) { activeHandles.add(handle) }
+                    if (handle != null) synchronized(run.handles) { run.handles.add(handle) }
                 } catch (e: Exception) {
                     item.status = RunItemStatus.FAILED; item.duration = System.currentTimeMillis() - startTime
-                    activeCount.decrementAndGet(); log("✗ Hata: ${item.entry.featureName} — ${e.message}")
-                    SwingUtilities.invokeLater { refreshStatusPanel(); updateProgress() }
+                    run.activeCount.decrementAndGet(); log(run, "✗ Hata: ${item.entry.featureName} — ${e.message}")
+                    SwingUtilities.invokeLater { runChanged(run); checkPipelineComplete(run) }
                 }
             }.start()
         }
     }
 
-    private fun stopPipeline() {
-        cancelled.set(true); autoRetryRemaining = 0; log("⏹ Pipeline durduruluyor...")
-        while (runQueue.isNotEmpty()) runQueue.poll()?.status = RunItemStatus.CANCELLED
-        synchronized(activeHandles) { activeHandles.forEach { it.stop() }; activeHandles.clear() }
-        pipelineRunItems.filter { it.status == RunItemStatus.RUNNING }.forEach { it.status = RunItemStatus.CANCELLED }
-        running.set(false); setRunningUI(false); refreshStatusPanel(); updateProgress()
-        cleanupSharedTarget()
-        log("⏹ Pipeline durduruldu.")
+    private fun stopPipeline(run: PipelineRun) {
+        run.cancelled.set(true); log(run, "⏹ Pipeline durduruluyor...")
+        while (run.queue.isNotEmpty()) run.queue.poll()?.status = RunItemStatus.CANCELLED
+        synchronized(run.handles) { run.handles.forEach { it.stop() }; run.handles.clear() }
+        run.items.filter { it.status == RunItemStatus.RUNNING }.forEach { it.status = RunItemStatus.CANCELLED }
+        run.running.set(false); runChanged(run)
+        cleanupSharedTarget(run)
+        log(run, "⏹ Pipeline durduruldu.")
+        onRunFinished?.invoke()
     }
 
-    private fun retryFailed() {
-        val failedItems = pipelineRunItems.filter { it.status == RunItemStatus.FAILED || it.status == RunItemStatus.CANCELLED }
-        if (failedItems.isEmpty()) { log("Tekrar koşulacak feature yok."); return }
+    private fun retryFailed(run: PipelineRun) {
+        val failedItems = run.items.filter { it.status == RunItemStatus.FAILED || it.status == RunItemStatus.CANCELLED }
+        if (failedItems.isEmpty()) { log(run, "Tekrar koşulacak feature yok."); return }
 
         // Raporları tekrar oku, fail olan case'leri tespit et
         val settings = ScenarioExplorerSettings.getInstance(project)
@@ -633,35 +870,38 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             if (failedScenarios.isNotEmpty()) {
                 val retryItem = PipelineRunItem(item.entry, item.sf, failedScenarios)
                 retryItems.add(retryItem)
-                log("🔄 ${item.entry.featureName}: ${failedScenarios.size}/${item.sf.scenarios.size} case tekrar koşulacak")
+                log(run, "🔄 ${item.entry.featureName}: ${failedScenarios.size}/${item.sf.scenarios.size} case tekrar koşulacak")
             }
         }
 
-        if (retryItems.isEmpty()) { log("Tekrar koşulacak fail case bulunamadı."); return }
+        if (retryItems.isEmpty()) { log(run, "Tekrar koşulacak fail case bulunamadı."); return }
 
         // Eski fail item'ları listeden çıkar, yeni retry item'ları ekle
-        pipelineRunItems.removeAll(failedItems.toSet())
-        pipelineRunItems.addAll(retryItems)
+        run.items.removeAll(failedItems.toSet())
+        run.items.addAll(retryItems)
 
-        runQueue.clear(); runQueue.addAll(retryItems)
+        run.queue.clear(); run.queue.addAll(retryItems)
 
         // Reset retry output areas
         for (item in retryItems) {
             item.outputArea.text = ""; item.outputArea.background = UIUtil.getPanelBackground()
         }
 
-        running.set(true); cancelled.set(false); activeCount.set(0); activeHandles.clear()
-        setRunningUI(true); refreshStatusPanel(); updateProgress()
-        log("🔄 Fail tekrar başlatıldı: ${retryItems.size} feature, toplam ${retryItems.sumOf { it.scenarios.size }} case")
-        Thread { feedQueue() }.start()
+        run.maxParallel = maxParallelSpinner.value as Int
+        run.startDelaySec = startDelaySpinner.value as Int
+        run.nextDelaySec = nextDelaySpinner.value as Int
+        run.running.set(true); run.cancelled.set(false); run.activeCount.set(0); run.handles.clear()
+        runChanged(run)
+        log(run, "🔄 Fail tekrar başlatıldı: ${retryItems.size} feature, toplam ${retryItems.sumOf { it.scenarios.size }} case")
+        Thread { feedQueue(run) }.start()
     }
 
-    /** Pipeline state'ini diske kaydet — her status değişikliğinde çağrılır */
-    private fun persistPipelineState() {
-        val pipelineName = getActivePipeline()?.name ?: "Pipeline"
-        val items = pipelineRunItems.mapIndexed { idx, item ->
+    /** Bir run'ın state'ini diske kaydet — her status değişikliğinde çağrılır */
+    private fun persistRun(run: PipelineRun) {
+        val key = keyFor(run.pipeline)
+        val items = run.items.mapIndexed { idx, item ->
             // Her item'ın output'unu da kaydet
-            PipelineStateManager.saveItemOutput(project, idx, item.outputArea.text)
+            PipelineStateManager.saveItemOutput(project, key, idx, item.outputArea.text)
             PipelineStateManager.RunItemState(
                 featurePath = item.entry.featurePath,
                 featureName = item.entry.featureName,
@@ -671,148 +911,87 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                 scenarioCount = item.scenarios.size
             )
         }
-        PipelineStateManager.saveState(project, pipelineName, running.get(), items)
+        PipelineStateManager.saveState(project, key, run.pipeline.name, run.running.get(), items)
+        PipelineStateManager.saveLog(project, key, run.logArea.text)
     }
 
-    /** IDE yeniden açıldığında son pipeline state'ini geri yükle */
+    /** IDE yeniden açıldığında her pipeline'ın son koşum state'ini geri yükle */
     private fun restorePipelineState() {
-        val state = PipelineStateManager.loadState(project) ?: return
+        for ((key, state) in PipelineStateManager.listStates(project)) {
+            val pipeline = pipelines.firstOrNull { it.name == state.pipelineName && keyFor(it) == key } ?: continue
+            val run = PipelineRun(pipeline)
 
-        // Log'u geri yükle
-        val savedLog = PipelineStateManager.loadLog(project)
-        if (savedLog.isNotEmpty()) {
-            logArea.text = savedLog
-            logArea.caretPosition = logArea.document.length
-        }
-
-        // Run item'ları geri oluştur
-        pipelineRunItems.clear()
-        for ((idx, itemState) in state.items.withIndex()) {
-            val sf = allFiles.find { it.file.path == itemState.featurePath }
-            val scenarios = if (sf != null && itemState.scenarioNames.isNotEmpty()) {
-                sf.scenarios.filter { it.name in itemState.scenarioNames }
-            } else {
-                sf?.scenarios ?: emptyList()
+            // Log'u geri yükle
+            val savedLog = PipelineStateManager.loadLog(project, key)
+            if (savedLog.isNotEmpty()) {
+                run.logArea.text = savedLog
+                run.logArea.caretPosition = run.logArea.document.length
             }
-            val entry = PipelineEntry(itemState.featurePath, itemState.featureName, itemState.scenarioNames)
-            val restoredStatus = try { RunItemStatus.valueOf(itemState.status) } catch (_: Exception) { RunItemStatus.CANCELLED }
-            // Eğer RUNNING olarak kaydedilmişse ama artık process yok, CANCELLED olarak göster
-            val finalStatus = if (restoredStatus == RunItemStatus.RUNNING) RunItemStatus.CANCELLED else restoredStatus
 
-            val runItem = PipelineRunItem(
-                entry = entry,
-                sf = sf ?: ScenarioFile(java.io.File(itemState.featurePath), itemState.featureName, emptyList(), com.scenarioexplorer.model.ScenarioType.CUCUMBER, emptyList()),
-                scenarios = scenarios,
-                status = finalStatus,
-                duration = itemState.duration
-            )
-            // Output'u geri yükle
-            val savedOutput = PipelineStateManager.loadItemOutput(project, idx)
-            if (savedOutput.isNotEmpty()) {
-                runItem.outputArea.text = savedOutput
+            // Run item'ları geri oluştur
+            for ((idx, itemState) in state.items.withIndex()) {
+                val sf = allFiles.find { it.file.path == itemState.featurePath }
+                val scenarios = if (sf != null && itemState.scenarioNames.isNotEmpty()) {
+                    sf.scenarios.filter { it.name in itemState.scenarioNames }
+                } else {
+                    sf?.scenarios ?: emptyList()
+                }
+                val entry = PipelineEntry(itemState.featurePath, itemState.featureName, itemState.scenarioNames)
+                val restoredStatus = try { RunItemStatus.valueOf(itemState.status) } catch (_: Exception) { RunItemStatus.CANCELLED }
+                // Eğer RUNNING olarak kaydedilmişse ama artık process yok, CANCELLED olarak göster
+                val finalStatus = if (restoredStatus == RunItemStatus.RUNNING) RunItemStatus.CANCELLED else restoredStatus
+
+                val runItem = PipelineRunItem(
+                    entry = entry,
+                    sf = sf ?: ScenarioFile(java.io.File(itemState.featurePath), itemState.featureName, emptyList(), com.scenarioexplorer.model.ScenarioType.CUCUMBER, emptyList()),
+                    scenarios = scenarios,
+                    status = finalStatus,
+                    duration = itemState.duration
+                )
+                // Output'u geri yükle
+                val savedOutput = PipelineStateManager.loadItemOutput(project, key, idx)
+                if (savedOutput.isNotEmpty()) {
+                    runItem.outputArea.text = savedOutput
+                }
+                run.items.add(runItem)
             }
-            pipelineRunItems.add(runItem)
-        }
 
-        if (pipelineRunItems.isNotEmpty()) {
-            showOutputFor(null)
-            refreshStatusPanel()
-            updateProgress()
-
+            if (run.items.isEmpty()) continue
+            runs.add(run)
             // Eğer running olarak kaydedilmişse ama artık process yok, uyarı göster
-            if (state.running) {
-                log("⚠ IDE yeniden açıldı — önceki pipeline process'leri artık bağlı değil")
-                val failed = pipelineRunItems.count { it.status == RunItemStatus.FAILED }
-                val cancelledN = pipelineRunItems.count { it.status == RunItemStatus.CANCELLED }
-                retryFailedButton.isEnabled = failed > 0 || cancelledN > 0
-            }
+            if (state.running) log(run, "⚠ IDE yeniden açıldı — önceki pipeline process'leri artık bağlı değil")
         }
     }
 
-    private fun checkPipelineComplete() {
-        if (pipelineRunItems.all { it.status != RunItemStatus.WAITING && it.status != RunItemStatus.RUNNING } && running.get()) {
-            running.set(false)
-            val passed = pipelineRunItems.count { it.status == RunItemStatus.PASSED }
-            val failed = pipelineRunItems.count { it.status == RunItemStatus.FAILED }
-            val cancelledN = pipelineRunItems.count { it.status == RunItemStatus.CANCELLED }
-            setRunningUI(false); retryFailedButton.isEnabled = failed > 0 || cancelledN > 0
-            log("═══════════════════════════════════")
-            log("Pipeline tamamlandı: ✓$passed ✗$failed ⊘$cancelledN | Toplam: ${formatDuration(pipelineRunItems.sumOf { it.duration })}")
-            log("═══════════════════════════════════")
-
-            // Auto-retry: fail varsa ve hak kaldıysa otomatik tekrar koş
-            if (failed > 0 && autoRetryRemaining > 0 && !cancelled.get()) {
-                val delaySec = autoRetryDelaySpin.value as Int
-                val retryNum = (autoRetryCountSpinner.value as Int) - autoRetryRemaining + 1
-                autoRetryRemaining--
-                log("🔄 Auto Retry $retryNum — ${delaySec}sn sonra fail'lar tekrar koşulacak (kalan hak: $autoRetryRemaining)")
-                Thread {
-                    // Pre-retry komutu çalıştır
-                    val preRetryCmd = ScenarioExplorerSettings.getInstance(project).state.preRetryCommand.trim()
-                    if (preRetryCmd.isNotEmpty() && !cancelled.get()) {
-                        log("⚙ Pre-retry komutu çalıştırılıyor: $preRetryCmd")
-                        try {
-                            val basePath = project.basePath ?: ""
-                            val parts = preRetryCmd.split("\\s+".toRegex())
-                            val cmdLine = com.intellij.execution.configurations.GeneralCommandLine().apply {
-                                workDirectory = java.io.File(basePath)
-                                exePath = parts.first()
-                                if (parts.size > 1) addParameters(parts.drop(1))
-                            }
-                            val preLatch = java.util.concurrent.CountDownLatch(1)
-                            var preOk = false
-                            val handler = com.intellij.execution.process.OSProcessHandler(cmdLine)
-                            handler.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
-                                override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
-                                    SwingUtilities.invokeLater { log(event.text.trimEnd()) }
-                                }
-                                override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
-                                    preOk = event.exitCode == 0
-                                    preLatch.countDown()
-                                }
-                            })
-                            handler.startNotify()
-                            preLatch.await()
-                            if (preOk) log("✓ Pre-retry komutu tamamlandı")
-                            else log("⚠ Pre-retry komutu hata ile bitti, retry devam ediyor")
-                        } catch (e: Exception) {
-                            log("⚠ Pre-retry komutu çalıştırılamadı: ${e.message}")
-                        }
-                    }
-
-                    // Bekleme süresi
-                    for (i in delaySec downTo 1) {
-                        if (cancelled.get()) break
-                        SwingUtilities.invokeLater {
-                            progressBar.string = "Auto Retry $retryNum — ${i}sn bekleniyor..."
-                        }
-                        Thread.sleep(1000)
-                    }
-                    if (!cancelled.get()) {
-                        SwingUtilities.invokeLater { retryFailed() }
-                    }
-                }.start()
-            }
+    private fun checkPipelineComplete(run: PipelineRun) {
+        if (run.items.all { it.status != RunItemStatus.WAITING && it.status != RunItemStatus.RUNNING } && run.running.get()) {
+            run.running.set(false)
+            val passed = run.items.count { it.status == RunItemStatus.PASSED }
+            val failed = run.items.count { it.status == RunItemStatus.FAILED }
+            val cancelledN = run.items.count { it.status == RunItemStatus.CANCELLED }
+            cleanupSharedTarget(run)
+            runChanged(run)
+            log(run, "═══════════════════════════════════")
+            log(run, "Pipeline tamamlandı: ✓$passed ✗$failed ⊘$cancelledN | Toplam: ${formatDuration(run.items.sumOf { it.duration })}")
+            log(run, "═══════════════════════════════════")
+            onRunFinished?.invoke()
         }
     }
 
-    private fun setRunningUI(isRunning: Boolean) {
-        startButton.isEnabled = !isRunning; stopButton.isEnabled = isRunning; retryFailedButton.isEnabled = false
-        addPipelineBtn.isEnabled = !isRunning; deletePipelineBtn.isEnabled = !isRunning; pipelineCombo.isEnabled = !isRunning
-    }
-
-    private fun cleanupSharedTarget() {
-        sharedTargetDir?.let { dir ->
+    private fun cleanupSharedTarget(run: PipelineRun) {
+        run.sharedTarget?.let { dir ->
             try { dir.deleteRecursively() } catch (_: Exception) {}
-            sharedTargetDir = null
+            run.sharedTarget = null
         }
     }
 
-    /** Switch the output view to a specific run item's output, or pipeline log if null */
-    private fun showOutputFor(item: PipelineRunItem?) {
+    /** Switch the output view to a specific run item's output, or the pipeline log if item is null */
+    private fun showOutputFor(run: PipelineRun, item: PipelineRunItem?) {
+        run.viewedItem = item
+        if (run !== viewedRun()) return
         if (item == null) {
             outputTitleLabel.text = "📋 Pipeline Log"
-            outputScrollPane.setViewportView(logArea)
+            outputScrollPane.setViewportView(run.logArea)
         } else {
             outputTitleLabel.text = "📋 ${item.entry.featureName} (${item.scenarios.size} case)"
             outputScrollPane.setViewportView(item.outputArea)
@@ -821,9 +1000,8 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // === STATUS PANEL ===
 
-    private fun refreshStatusPanel() {
+    private fun rebuildStatusPanel(run: PipelineRun) {
         statusPanel.removeAll()
-        persistPipelineState()
 
         // Pipeline Log card — always first
         val logCard = JPanel().apply {
@@ -836,11 +1014,11 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             add(JBLabel("📋 Pipeline Log").apply { font = font.deriveFont(Font.BOLD, 11f); alignmentX = Component.LEFT_ALIGNMENT })
         }
         logCard.addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(e: java.awt.event.MouseEvent) { showOutputFor(null) }
+            override fun mouseClicked(e: java.awt.event.MouseEvent) { showOutputFor(run, null) }
         })
         statusPanel.add(logCard)
 
-        for ((idx, item) in pipelineRunItems.withIndex()) {
+        for ((idx, item) in run.items.withIndex()) {
             val bgColor = when (item.status) {
                 RunItemStatus.RUNNING -> Color(UIConstants.BLUE.red, UIConstants.BLUE.green, UIConstants.BLUE.blue, 40)
                 RunItemStatus.PASSED -> Color(UIConstants.GREEN.red, UIConstants.GREEN.green, UIConstants.GREEN.blue, 40)
@@ -883,18 +1061,18 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             }
             val clickItem = item
             card.addMouseListener(object : java.awt.event.MouseAdapter() {
-                override fun mouseClicked(e: java.awt.event.MouseEvent) { showOutputFor(clickItem) }
+                override fun mouseClicked(e: java.awt.event.MouseEvent) { showOutputFor(run, clickItem) }
             })
             statusPanel.add(card)
         }
         statusPanel.revalidate(); statusPanel.repaint()
     }
 
-    private fun updateProgress() {
-        val total = pipelineRunItems.size
+    private fun updateProgressBar(run: PipelineRun) {
+        val total = run.items.size
         if (total == 0) { progressBar.value = 0; progressBar.string = "Hazır"; return }
-        val done = pipelineRunItems.count { it.status != RunItemStatus.WAITING && it.status != RunItemStatus.RUNNING }
-        val runN = pipelineRunItems.count { it.status == RunItemStatus.RUNNING }
+        val done = run.items.count { it.status != RunItemStatus.WAITING && it.status != RunItemStatus.RUNNING }
+        val runN = run.items.count { it.status == RunItemStatus.RUNNING }
         progressBar.value = (done * 100) / total; progressBar.string = "$done/$total tamamlandı ($runN koşuyor)"
     }
 
@@ -936,8 +1114,15 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                 }
             }
         }
-        if (pipelines.isNotEmpty()) activePipelineIndex = 0
-        refreshPipelineCombo()
+        // Names identify pipelines (and their saved run state) — make older duplicates unique
+        val seen = mutableSetOf<String>()
+        for (p in pipelines) {
+            var candidate = p.name; var n = 2
+            while (!seen.add(candidate.lowercase())) candidate = "${p.name} ($n)".also { n++ }
+            p.name = candidate
+        }
+        activePipelineIndex = -1
+        refreshPipelines()
     }
 
     // === RENDERERS ===
@@ -1005,7 +1190,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             for (entry in entries) {
                 if (pipeline.items.none { it.key == entry.key }) { pipeline.items.add(idx.coerceAtMost(pipeline.items.size), entry); idx++ }
             }
-            refreshPipelineCombo(); savePipelines()
+            refreshPipelines(); savePipelines()
             return entries.isNotEmpty()
         }
 
@@ -1020,12 +1205,12 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // === UTILS ===
 
-    private fun log(message: String) {
+    private fun log(run: PipelineRun, message: String) {
         val time = SimpleDateFormat("HH:mm:ss").format(Date())
         SwingUtilities.invokeLater {
-            logArea.append("[$time] $message\n")
-            logArea.caretPosition = logArea.document.length
-            PipelineStateManager.saveLog(project, logArea.text)
+            run.logArea.append("[$time] $message\n")
+            run.logArea.caretPosition = run.logArea.document.length
+            PipelineStateManager.saveLog(project, keyFor(run.pipeline), run.logArea.text)
         }
     }
 

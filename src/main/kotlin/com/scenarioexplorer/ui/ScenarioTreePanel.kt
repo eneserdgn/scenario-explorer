@@ -1,10 +1,9 @@
 package com.scenarioexplorer.ui
 
 import com.intellij.icons.AllIcons
-import com.intellij.ui.CheckboxTree
-import com.intellij.ui.CheckedTreeNode
+import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.SimpleTextAttributes
-import com.intellij.util.ui.JBUI
+import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.UIUtil
 import com.scenarioexplorer.model.*
 import java.awt.*
@@ -13,23 +12,27 @@ import java.awt.event.MouseEvent
 import javax.swing.JTree
 import javax.swing.JViewport
 import javax.swing.SwingConstants
+import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
-class CheckboxTreePanel(
+class ScenarioTreePanel(
     private val onScenarioSelected: (Scenario) -> Unit
 ) {
-    private val rootNode = CheckedTreeNode("Scenarios")
+    private val rootNode = DefaultMutableTreeNode("Scenarios")
     private val treeModel = DefaultTreeModel(rootNode)
 
-    val tree: CheckboxTree = CheckboxTree(ScenarioCheckboxRenderer(), rootNode).apply {
+    val tree: Tree = Tree(treeModel).apply {
+        cellRenderer = ScenarioTreeCellRenderer()
         isRootVisible = false
         showsRootHandles = true
+        // Double-click is handled below (folders/files toggle, scenarios re-open)
+        toggleClickCount = 0
         selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
 
         addTreeSelectionListener {
-            val node = lastSelectedPathComponent as? CheckedTreeNode ?: return@addTreeSelectionListener
+            val node = lastSelectedPathComponent as? DefaultMutableTreeNode ?: return@addTreeSelectionListener
             if (node.userObject is Scenario) {
                 onScenarioSelected(node.userObject as Scenario)
             }
@@ -40,7 +43,7 @@ class CheckboxTreePanel(
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount == 2) {
                     val path = getPathForLocation(e.x, e.y) ?: return
-                    val node = path.lastPathComponent as? CheckedTreeNode ?: return
+                    val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
                     when (node.userObject) {
                         is Scenario -> onScenarioSelected(node.userObject as Scenario)
                         else -> {
@@ -52,83 +55,11 @@ class CheckboxTreePanel(
         })
     }
 
-    /** Button bar for quick check/uncheck by status */
-    val filterButtonsPanel: javax.swing.JPanel = javax.swing.JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 2)).apply {
-        border = JBUI.Borders.empty(2, 4)
-
-        val swAll = ToggleSwitchButton("☑ Tümünü Seç").apply {
-            addActionListener { setAllChecked(isSelected) }
-        }
-
-        val swFailed = ToggleSwitchButton("✗ Failed").apply {
-            addActionListener {
-                if (isSelected) checkByStatus(StepStatus.FAILED) else uncheckByStatus(StepStatus.FAILED)
-            }
-        }
-        val swNotRun = ToggleSwitchButton("○ Not Run").apply {
-            addActionListener {
-                if (isSelected) checkByStatus(StepStatus.NOT_RUN) else uncheckByStatus(StepStatus.NOT_RUN)
-            }
-        }
-
-        add(swAll)
-        add(javax.swing.JSeparator(javax.swing.SwingConstants.VERTICAL).apply { preferredSize = Dimension(1, 16) })
-        add(swFailed)
-        add(javax.swing.JSeparator(javax.swing.SwingConstants.VERTICAL).apply { preferredSize = Dimension(1, 16) })
-        add(swNotRun)
-    }
-
-    private fun setAllChecked(checked: Boolean) {
-        visitScenarioNodes(rootNode) { it.isChecked = checked }
-        syncParentStates(rootNode)
-        treeModel.reload()
-    }
-
-    private fun checkByStatus(status: StepStatus) {
-        visitScenarioNodes(rootNode) { node ->
-            val s = node.userObject as Scenario
-            if (s.status == status) node.isChecked = true
-        }
-        syncParentStates(rootNode)
-        treeModel.reload()
-    }
-
-    private fun uncheckByStatus(status: StepStatus) {
-        visitScenarioNodes(rootNode) { node ->
-            val s = node.userObject as Scenario
-            if (s.status == status) node.isChecked = false
-        }
-        syncParentStates(rootNode)
-        treeModel.reload()
-    }
-
-    /** Sets each non-leaf node's isChecked to true if any child scenario is checked. */
-    private fun syncParentStates(node: CheckedTreeNode) {
-        for (i in 0 until node.childCount) {
-            (node.getChildAt(i) as? CheckedTreeNode)?.let { syncParentStates(it) }
-        }
-        if (node.userObject !is Scenario && node.childCount > 0) {
-            node.isChecked = (0 until node.childCount).any {
-                (node.getChildAt(it) as? CheckedTreeNode)?.isChecked == true
-            }
-        }
-    }
-
-    private fun visitScenarioNodes(node: CheckedTreeNode, action: (CheckedTreeNode) -> Unit) {
-        if (node.userObject is Scenario) {
-            action(node)
-        }
-        for (i in 0 until node.childCount) {
-            (node.getChildAt(i) as? CheckedTreeNode)?.let { visitScenarioNodes(it, action) }
-        }
-    }
-
     fun updateTree(files: List<ScenarioFile>, reports: Map<String, ReportEntry>) {
-        // Save expanded state, selection, and checked state before rebuild
+        // Save expanded state and selection before rebuild
         val expandedPaths = mutableSetOf<String>()
-        val selectedScenarioName = (tree.lastSelectedPathComponent as? CheckedTreeNode)
+        val selectedScenarioName = (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)
             ?.let { (it.userObject as? Scenario)?.name }
-        val checkedNames = getCheckedScenarios().map { it.name }.toSet()
 
         saveExpandedPaths(rootNode, "")  { expandedPaths.add(it) }
 
@@ -137,16 +68,16 @@ class CheckboxTreePanel(
         val grouped = files.groupBy { it.file.parentFile?.path ?: "" }
 
         for ((dirPath, scenarioFiles) in grouped.toSortedMap()) {
-            val dirName = dirPath.substringAfterLast("/").ifEmpty { dirPath }
+            val dirName = java.io.File(dirPath).name.ifEmpty { dirPath }
 
             val dirStats = computeDirStats(scenarioFiles, reports)
             val dirData = DirNodeData(dirName, dirStats)
-            val dirNode = CheckedTreeNode(dirData)
+            val dirNode = DefaultMutableTreeNode(dirData)
 
             for (sf in scenarioFiles) {
                 val fileStats = computeFileStats(sf, reports)
                 val fileData = FileNodeData(sf.featureName, sf.type, sf.featureTags, fileStats)
-                val fileNode = CheckedTreeNode(fileData)
+                val fileNode = DefaultMutableTreeNode(fileData)
 
                 for (scenario in sf.scenarios) {
                     val report = reports[scenario.name]
@@ -166,12 +97,7 @@ class CheckboxTreePanel(
                         )
                     } else scenario
 
-                    val scenarioNode = CheckedTreeNode(enriched)
-                    // Preserve checked state: if we had previous checks, restore them; otherwise keep default
-                    if (checkedNames.isNotEmpty()) {
-                        scenarioNode.isChecked = enriched.name in checkedNames
-                    }
-                    fileNode.add(scenarioNode)
+                    fileNode.add(DefaultMutableTreeNode(enriched))
                 }
                 dirNode.add(fileNode)
             }
@@ -179,7 +105,6 @@ class CheckboxTreePanel(
         }
 
         treeModel.reload()
-        tree.model = treeModel
 
         // Restore expanded state
         restoreExpandedPaths(rootNode, "", expandedPaths)
@@ -190,9 +115,9 @@ class CheckboxTreePanel(
         }
     }
 
-    private fun saveExpandedPaths(node: CheckedTreeNode, prefix: String, collector: (String) -> Unit) {
+    private fun saveExpandedPaths(node: DefaultMutableTreeNode, prefix: String, collector: (String) -> Unit) {
         for (i in 0 until node.childCount) {
-            val child = node.getChildAt(i) as? CheckedTreeNode ?: continue
+            val child = node.getChildAt(i) as? DefaultMutableTreeNode ?: continue
             val key = when (val obj = child.userObject) {
                 is DirNodeData -> "$prefix/dir:${obj.name}"
                 is FileNodeData -> "$prefix/file:${obj.name}"
@@ -206,9 +131,9 @@ class CheckboxTreePanel(
         }
     }
 
-    private fun restoreExpandedPaths(node: CheckedTreeNode, prefix: String, expandedPaths: Set<String>) {
+    private fun restoreExpandedPaths(node: DefaultMutableTreeNode, prefix: String, expandedPaths: Set<String>) {
         for (i in 0 until node.childCount) {
-            val child = node.getChildAt(i) as? CheckedTreeNode ?: continue
+            val child = node.getChildAt(i) as? DefaultMutableTreeNode ?: continue
             val key = when (val obj = child.userObject) {
                 is DirNodeData -> "$prefix/dir:${obj.name}"
                 is FileNodeData -> "$prefix/file:${obj.name}"
@@ -221,12 +146,6 @@ class CheckboxTreePanel(
         }
     }
 
-    fun getCheckedScenarios(): List<Scenario> {
-        val result = mutableListOf<Scenario>()
-        collectChecked(rootNode, result)
-        return result
-    }
-
     fun selectScenarioByName(name: String): Boolean {
         val node = findScenarioNode(rootNode, name) ?: return false
         val path = buildTreePath(node)
@@ -236,17 +155,17 @@ class CheckboxTreePanel(
         return true
     }
 
-    private fun findScenarioNode(node: CheckedTreeNode, name: String): CheckedTreeNode? {
+    private fun findScenarioNode(node: DefaultMutableTreeNode, name: String): DefaultMutableTreeNode? {
         if (node.userObject is Scenario && (node.userObject as Scenario).name == name) return node
         for (i in 0 until node.childCount) {
-            val child = node.getChildAt(i) as? CheckedTreeNode ?: continue
+            val child = node.getChildAt(i) as? DefaultMutableTreeNode ?: continue
             val found = findScenarioNode(child, name)
             if (found != null) return found
         }
         return null
     }
 
-    private fun buildTreePath(node: CheckedTreeNode): TreePath {
+    private fun buildTreePath(node: DefaultMutableTreeNode): TreePath {
         val nodes = mutableListOf<Any>()
         var current: javax.swing.tree.TreeNode? = node
         while (current != null) {
@@ -254,15 +173,6 @@ class CheckboxTreePanel(
             current = current.parent
         }
         return TreePath(nodes.toTypedArray())
-    }
-
-    private fun collectChecked(node: CheckedTreeNode, result: MutableList<Scenario>) {
-        if (node.userObject is Scenario && node.isChecked) {
-            result.add(node.userObject as Scenario)
-        }
-        for (i in 0 until node.childCount) {
-            (node.getChildAt(i) as? CheckedTreeNode)?.let { collectChecked(it, result) }
-        }
     }
 
     // --- Stats computation ---
@@ -316,12 +226,12 @@ class CheckboxTreePanel(
 
     // --- Renderer ---
 
-    private class ScenarioCheckboxRenderer : CheckboxTree.CheckboxTreeCellRenderer() {
+    private class ScenarioTreeCellRenderer : ColoredTreeCellRenderer() {
         // Estimated per-depth-level indent (px) — used to keep our forced row width
         // from overrunning the tree's visible edge on deeply-nested (scenario) rows.
         private val indentPerLevel = 20
 
-        // Row width we report from getPreferredSize(), computed per-node in customizeRenderer.
+        // Row width we report from getPreferredSize(), computed per-node in customizeCellRenderer.
         private var rowWidth = 0
 
         override fun getPreferredSize(): Dimension {
@@ -329,19 +239,19 @@ class CheckboxTreePanel(
             return if (rowWidth > natural.width) Dimension(rowWidth, natural.height) else natural
         }
 
-        override fun customizeRenderer(
-            tree: JTree?, value: Any?, selected: Boolean,
+        override fun customizeCellRenderer(
+            tree: JTree, value: Any?, selected: Boolean,
             expanded: Boolean, leaf: Boolean, row: Int, hasFocus: Boolean
         ) {
-            val node = value as? CheckedTreeNode ?: return
+            val node = value as? DefaultMutableTreeNode ?: return
             // Use the enclosing scroll pane's viewport width, not tree.width: the viewport
             // is sized externally (by the split pane), whereas tree.width is itself derived
             // from each row's preferred size — using it here would create a growth feedback loop.
-            val viewportWidth = (tree?.parent as? JViewport)?.width ?: tree?.width ?: 0
+            val viewportWidth = (tree.parent as? JViewport)?.width ?: tree.width
             val indentOffset = node.level * indentPerLevel
             rowWidth = (viewportWidth - indentOffset).coerceAtLeast(0)
-            val available = (rowWidth - checkbox.preferredSize.width - END_MARGIN).coerceAtLeast(0)
-            val fm = if (available > 0) tree?.getFontMetrics(textRenderer.font) else null
+            val available = (rowWidth - END_MARGIN).coerceAtLeast(0)
+            val fm = if (available > 0) tree.getFontMetrics(font) else null
 
             when (val userObj = node.userObject) {
                 is Scenario -> renderScenario(userObj, available, fm)
@@ -351,7 +261,7 @@ class CheckboxTreePanel(
         }
 
         private fun renderScenario(s: Scenario, available: Int, fm: FontMetrics?) {
-            textRenderer.icon = when (s.status) {
+            icon = when (s.status) {
                 StepStatus.PASSED -> AllIcons.RunConfigurations.TestPassed
                 StepStatus.FAILED -> AllIcons.RunConfigurations.TestFailed
                 StepStatus.NOT_RUN -> AllIcons.Actions.Suspend
@@ -363,23 +273,23 @@ class CheckboxTreePanel(
             val nameBudget = (available - ICON_BUDGET - rightWidth - MARGIN).coerceAtLeast(0)
             val name = if (fm != null && nameBudget > 0) truncate(" ${s.name} ", nameBudget, fm) else " ${s.name} "
 
-            textRenderer.append(name, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            append(name, SimpleTextAttributes.REGULAR_ATTRIBUTES)
             if (s.tags.isNotEmpty()) {
-                textRenderer.append(" ${s.tags.joinToString(" ")} ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                append(" ${s.tags.joinToString(" ")} ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             }
             if (durationText != null) {
-                textRenderer.append("  $durationText", fileDurationAttrs())
-                if (available > 0) textRenderer.appendTextPadding(available, SwingConstants.RIGHT)
+                append("  $durationText", fileDurationAttrs())
+                if (available > 0) appendTextPadding(available, SwingConstants.RIGHT)
             }
         }
 
         private fun renderFile(f: FileNodeData, available: Int, fm: FontMetrics?) {
-            textRenderer.icon = AllIcons.FileTypes.Text
+            icon = AllIcons.FileTypes.Text
             appendNodeRow(f.name, f.stats, available, fm, isDir = false)
         }
 
         private fun renderDir(d: DirNodeData, available: Int, fm: FontMetrics?) {
-            textRenderer.icon = AllIcons.Nodes.Folder
+            icon = AllIcons.Nodes.Folder
             appendNodeRow(d.name, d.stats, available, fm, isDir = true)
         }
 
@@ -394,7 +304,7 @@ class CheckboxTreePanel(
             }
 
             if (stats.total == 0) {
-                textRenderer.append(name, nameAttrs)
+                append(name, nameAttrs)
                 return
             }
             val notRun = stats.total - stats.passed - stats.failed
@@ -415,11 +325,11 @@ class CheckboxTreePanel(
             val statsAttrs = if (isDir) SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES else SimpleTextAttributes.GRAYED_ATTRIBUTES
             val durationAttrs = if (isDir) SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES else fileDurationAttrs()
 
-            textRenderer.append(truncatedName, nameAttrs)
-            textRenderer.append("  $statsText", statsAttrs)
-            if (statsTargetX > 0) textRenderer.appendTextPadding(statsTargetX, SwingConstants.RIGHT)
-            textRenderer.append("  $durationText", durationAttrs)
-            if (durationTargetX > 0) textRenderer.appendTextPadding(durationTargetX, SwingConstants.RIGHT)
+            append(truncatedName, nameAttrs)
+            append("  $statsText", statsAttrs)
+            if (statsTargetX > 0) appendTextPadding(statsTargetX, SwingConstants.RIGHT)
+            append("  $durationText", durationAttrs)
+            if (durationTargetX > 0) appendTextPadding(durationTargetX, SwingConstants.RIGHT)
         }
 
         // Smaller than a dir's duration text — reinforces that files/scenarios sit one level deeper.
