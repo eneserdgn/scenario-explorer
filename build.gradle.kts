@@ -44,6 +44,10 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.4.1</b><br>
+            <ul>
+                <li>Pipeline detail page: the feature list on the left is now grouped by folder (like the Scenarios tab); selecting a folder selects all its features when adding scenarios</li>
+            </ul>
             <b>1.4.0</b><br>
             <ul>
                 <li>Pipeline tab redesigned into two pages: a card list of your pipelines, and a detail page to add/remove scenarios and run</li>
