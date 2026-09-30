@@ -115,6 +115,20 @@ class ScenarioTreePanel(
         }
     }
 
+    /**
+     * When the panel's width changes (e.g. a vertical scrollbar appears/disappears, or the
+     * splitter is dragged), Swing does NOT re-measure rows that didn't otherwise change — so
+     * their right-aligned duration column keeps using the old width and drifts out of line with
+     * freshly-rendered rows. Reload (preserving expansion) forces every visible row to be
+     * re-measured against the current width, so everything re-aligns consistently.
+     */
+    fun relayoutForResize() {
+        val expandedPaths = mutableSetOf<String>()
+        saveExpandedPaths(rootNode, "") { expandedPaths.add(it) }
+        treeModel.reload()
+        restoreExpandedPaths(rootNode, "", expandedPaths)
+    }
+
     private fun saveExpandedPaths(node: DefaultMutableTreeNode, prefix: String, collector: (String) -> Unit) {
         for (i in 0 until node.childCount) {
             val child = node.getChildAt(i) as? DefaultMutableTreeNode ?: continue
@@ -247,6 +261,10 @@ class ScenarioTreePanel(
             // Use the enclosing scroll pane's viewport width, not tree.width: the viewport
             // is sized externally (by the split pane), whereas tree.width is itself derived
             // from each row's preferred size — using it here would create a growth feedback loop.
+            // NOTE: do NOT call tree.getRowBounds()/getPathBounds() here — IntelliJ's DefaultTreeUI
+            // resolves those through getNodeDimensions(), which calls back into this very renderer
+            // to measure the row, recursing into this method again → StackOverflowError (confirmed
+            // by testing). The per-level pixel indent must stay a flat, non-measured estimate.
             val viewportWidth = (tree.parent as? JViewport)?.width ?: tree.width
             val indentOffset = node.level * indentPerLevel
             rowWidth = (viewportWidth - indentOffset).coerceAtLeast(0)
@@ -322,11 +340,20 @@ class ScenarioTreePanel(
             val nameBudget = (statsTargetX - statsWidth - MARGIN).coerceAtLeast(0)
             val truncatedName = if (fm != null && nameBudget > 0) truncate(name, nameBudget, fm) else name
 
-            val statsAttrs = if (isDir) SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES else SimpleTextAttributes.GRAYED_ATTRIBUTES
+            val bracketAttrs = if (isDir) SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES else SimpleTextAttributes.GRAYED_ATTRIBUTES
+            val statsStyle = if (isDir) SimpleTextAttributes.STYLE_BOLD else SimpleTextAttributes.STYLE_PLAIN
+            val passAttrs = SimpleTextAttributes(statsStyle, UIConstants.GREEN)
+            val failAttrs = SimpleTextAttributes(statsStyle, UIConstants.RED)
+            val notRunAttrs = SimpleTextAttributes(statsStyle, UIConstants.GRAY)
             val durationAttrs = if (isDir) SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES else fileDurationAttrs()
 
             append(truncatedName, nameAttrs)
-            append("  $statsText", statsAttrs)
+            append("  [", bracketAttrs)
+            append("✓${stats.passed}", passAttrs)
+            append(" ", bracketAttrs)
+            append("✗${stats.failed}", failAttrs)
+            if (notRun > 0) { append(" ", bracketAttrs); append("○${notRun}", notRunAttrs) }
+            append("]", bracketAttrs)
             if (statsTargetX > 0) appendTextPadding(statsTargetX, SwingConstants.RIGHT)
             append("  $durationText", durationAttrs)
             if (durationTargetX > 0) appendTextPadding(durationTargetX, SwingConstants.RIGHT)

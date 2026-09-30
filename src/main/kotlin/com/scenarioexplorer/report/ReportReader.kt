@@ -62,6 +62,13 @@ object ReportReader {
     private fun parseCucumberReport(array: JsonArray, timestamp: String, sourceFile: String): Map<String, ReportEntry> {
         val results = mutableMapOf<String, ReportEntry>()
 
+        // Cucumber's per-step JSON timings exclude Maven/JVM start-up, so they always run a few
+        // seconds short of what the run actually took. When this report is for exactly one
+        // scenario (a single Run, or a pipeline chunk of size 1 — the default), ScenarioRunner
+        // leaves the real measured wall-clock time in a sidecar file; use it instead.
+        val totalScenarioCount = array.sumOf { it.asJsonObject.getAsJsonArray("elements")?.size() ?: 0 }
+        val wallTimeMs = if (totalScenarioCount == 1) readWallTime(sourceFile) else null
+
         for (featureElement in array) {
             val feature = featureElement.asJsonObject
             val elements = feature.getAsJsonArray("elements") ?: continue
@@ -119,9 +126,10 @@ object ReportReader {
                     finalSteps +
                     hookFailureEntries(afterHooks, "After Hook")
 
-                // Total duration = all steps + scenario-level before/after hooks
+                // Total duration = all steps + scenario-level before/after hooks, unless the real
+                // wall-clock time for this (single-scenario) run is known — that one is accurate.
                 val scenarioHooksDuration = (hooksDuration(beforeHooks) + hooksDuration(afterHooks)) / 1_000_000
-                val totalDuration = (finalSteps.mapNotNull { it.duration }.sum()) + scenarioHooksDuration
+                val totalDuration = wallTimeMs ?: ((finalSteps.mapNotNull { it.duration }.sum()) + scenarioHooksDuration)
 
                 results[name] = ReportEntry(
                     scenarioName = name,
@@ -155,6 +163,14 @@ object ReportReader {
             )
         }
         return entries
+    }
+
+    /** Reads the real wall-clock ms ScenarioRunner recorded next to [jsonSourceFile], if any. */
+    private fun readWallTime(jsonSourceFile: String): Long? {
+        return try {
+            val sidecar = File(File(jsonSourceFile).parentFile, "${File(jsonSourceFile).nameWithoutExtension}.${com.scenarioexplorer.runner.ScenarioRunner.WALLTIME_EXTENSION}")
+            if (sidecar.exists()) sidecar.readText().trim().toLongOrNull() else null
+        } catch (_: Exception) { null }
     }
 
     private fun extractScreenshotFromHooks(hooks: JsonArray): String? {

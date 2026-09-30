@@ -53,6 +53,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
     private val startDelaySpinner = JSpinner(SpinnerNumberModel(5, 0, 600, 5))
     private val nextDelaySpinner = JSpinner(SpinnerNumberModel(5, 0, 600, 5))
     private val chunkSizeSpinner = JSpinner(SpinnerNumberModel(1, 1, 50, 1))
+    private val retryCountSpinner = JSpinner(SpinnerNumberModel(0, 0, 10, 1))
 
     // Features grouped by folder (like the Scenarios tab): root -> SourceDir nodes -> FeatureSourceItem nodes
     private val sourceRoot = DefaultMutableTreeNode("Features")
@@ -120,6 +121,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         var status: RunItemStatus = RunItemStatus.WAITING,
         var duration: Long = 0,
         var handle: RunHandle? = null,
+        var retriesUsed: Int = 0,
         val outputArea: JTextArea = JTextArea().apply {
             isEditable = false
             font = Font("JetBrains Mono", Font.PLAIN, 11).let { f ->
@@ -141,6 +143,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         @Volatile var maxParallel = 5
         @Volatile var startDelaySec = 5
         @Volatile var nextDelaySec = 5
+        @Volatile var maxRetries = 0
         var viewedItem: PipelineRunItem? = null // which output is shown in the detail page (null = log)
         val logArea = JTextArea().apply {
             isEditable = false
@@ -242,6 +245,11 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
             add(JBLabel("Başlatma Arası (sn):")); add(startDelaySpinner.apply { preferredSize = Dimension(60, 28) })
             add(Box.createHorizontalStrut(6))
             add(JBLabel("Biten Sonrası (sn):")); add(nextDelaySpinner.apply { preferredSize = Dimension(60, 28) })
+            add(Box.createHorizontalStrut(6))
+            add(JBLabel("Retry:")); add(retryCountSpinner.apply {
+                preferredSize = Dimension(50, 28)
+                toolTipText = "Fail olan bir senaryo, koşum bitmeden boşta kalan bir yuva olur olmaz otomatik kaç kez tekrar koşulsun (0=kapalı)"
+            })
             add(Box.createHorizontalStrut(12))
             add(startButton); add(stopButton); add(retryFailedButton)
         }
@@ -737,6 +745,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         run.maxParallel = maxParallelSpinner.value as Int
         run.startDelaySec = startDelaySpinner.value as Int
         run.nextDelaySec = nextDelaySpinner.value as Int
+        run.maxRetries = retryCountSpinner.value as Int
         showRunAreaFor(pipeline)
 
         // Senaryo bazlı entry'leri ve feature bazlı entry'leri ayır
@@ -855,9 +864,13 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         val nextDelaySec = run.nextDelaySec
         var launched = 0
 
-        while (run.queue.isNotEmpty() && !run.cancelled.get()) {
+        // Keep looping while something is still running too, not just while the queue has items:
+        // a running item can fail and requeue itself for retry, and an idle slot should pick that
+        // retry up immediately rather than waiting for the whole pipeline to finish first.
+        while ((run.queue.isNotEmpty() || run.activeCount.get() > 0) && !run.cancelled.get()) {
+            if (run.queue.isEmpty()) { Thread.sleep(500); continue }
             if (run.activeCount.get() >= maxParallel) { Thread.sleep(1000); continue }
-            val item = run.queue.poll() ?: break
+            val item = run.queue.poll() ?: continue
             if (run.cancelled.get()) { item.status = RunItemStatus.CANCELLED; SwingUtilities.invokeLater { runChanged(run) }; break }
 
             val isInitial = launched < maxParallel
@@ -883,7 +896,9 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                             SwingUtilities.invokeLater {
                                 item.status = if (exitCode == 0) RunItemStatus.PASSED else RunItemStatus.FAILED
                                 log(run, if (exitCode == 0) "✓ Tamamlandı: ${item.entry.featureName} (${formatDuration(item.duration)})" else "✗ Fail: ${item.entry.featureName} (exit: $exitCode, ${formatDuration(item.duration)})")
-                                run.activeCount.decrementAndGet(); runChanged(run); checkPipelineComplete(run)
+                                run.activeCount.decrementAndGet()
+                                queueRetryIfNeeded(run, item)
+                                runChanged(run); checkPipelineComplete(run)
                             }
                         },
                         sharedTargetDir = run.sharedTarget
@@ -893,10 +908,23 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
                 } catch (e: Exception) {
                     item.status = RunItemStatus.FAILED; item.duration = System.currentTimeMillis() - startTime
                     run.activeCount.decrementAndGet(); log(run, "✗ Hata: ${item.entry.featureName} — ${e.message}")
-                    SwingUtilities.invokeLater { runChanged(run); checkPipelineComplete(run) }
+                    SwingUtilities.invokeLater { queueRetryIfNeeded(run, item); runChanged(run); checkPipelineComplete(run) }
                 }
             }.start()
         }
+    }
+
+    /**
+     * A failed item, still under its retry budget, is requeued right away — the still-running
+     * feedQueue loop (kept alive by [PipelineRun.activeCount]) picks it up the moment a slot frees,
+     * instead of waiting for every other item in the run to finish first.
+     */
+    private fun queueRetryIfNeeded(run: PipelineRun, item: PipelineRunItem) {
+        if (item.status != RunItemStatus.FAILED || item.retriesUsed >= run.maxRetries || run.cancelled.get()) return
+        val retryItem = PipelineRunItem(item.entry, item.sf, item.scenarios, retriesUsed = item.retriesUsed + 1)
+        run.items.add(retryItem)
+        run.queue.add(retryItem)
+        log(run, "🔄 Retry ${retryItem.retriesUsed}/${run.maxRetries}: ${item.entry.featureName}")
     }
 
     private fun stopPipeline(run: PipelineRun) {
@@ -952,6 +980,7 @@ class PipelinePanel(private val project: Project) : JPanel(BorderLayout()) {
         run.maxParallel = maxParallelSpinner.value as Int
         run.startDelaySec = startDelaySpinner.value as Int
         run.nextDelaySec = nextDelaySpinner.value as Int
+        run.maxRetries = retryCountSpinner.value as Int
         run.running.set(true); run.cancelled.set(false); run.activeCount.set(0); run.handles.clear()
         runChanged(run)
         log(run, "🔄 Fail tekrar başlatıldı: ${retryItems.size} feature, toplam ${retryItems.sumOf { it.scenarios.size }} case")

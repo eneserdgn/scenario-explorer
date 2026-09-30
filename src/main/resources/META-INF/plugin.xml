@@ -16,8 +16,6 @@
                     icon="/icons/enesReport.svg"
                     factoryClass="com.scenarioexplorer.ScenarioToolWindowFactory"/>
 
-        <fileEditorProvider implementation="com.scenarioexplorer.ui.ScenarioExplorerFileEditorProvider"/>
-
         <projectConfigurable
                 parentId="tools"
                 instance="com.scenarioexplorer.settings.ScenarioExplorerConfigurable"

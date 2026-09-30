@@ -5,6 +5,7 @@ import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBSplitter
 import com.intellij.ui.SearchTextField
@@ -192,6 +193,12 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             border = JBUI.Borders.empty()
             horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
         }
+        // Debounced: re-align every row's duration column once the width settles (dragging the
+        // splitter, or a scrollbar appearing/disappearing, fires many resize events in a row).
+        val relayoutTimer = Timer(150) { treePanel.relayoutForResize() }.apply { isRepeats = false }
+        treeScroll.viewport.addComponentListener(object : java.awt.event.ComponentAdapter() {
+            override fun componentResized(e: java.awt.event.ComponentEvent) { relayoutTimer.restart() }
+        })
         val leftPanel = JPanel(BorderLayout()).apply {
             add(topPanel, BorderLayout.NORTH)
             add(treeScroll, BorderLayout.CENTER)
@@ -370,7 +377,13 @@ class ScenarioExplorerPanel(private val project: Project) : JPanel(BorderLayout(
             title = "Select Report Folder"
             description = "Choose the folder containing Cucumber/Gauge JSON report files"
         }
-        val chosen = FileChooser.chooseFile(descriptor, project, null) ?: return
+        // Start from the current report path (or the project root) instead of IntelliJ's own
+        // "last visited folder" memory, which is shared by every file chooser in the IDE.
+        val currentPath = ScenarioExplorerSettings.getInstance(project).state.reportPath
+        val startDir = currentPath.takeIf { it.isNotBlank() }?.let { java.io.File(it) }
+            ?.takeIf { it.exists() }?.let { LocalFileSystem.getInstance().findFileByIoFile(it) }
+            ?: project.basePath?.let { LocalFileSystem.getInstance().findFileByPath(it) }
+        val chosen = FileChooser.chooseFile(descriptor, project, startDir) ?: return
         val path = chosen.path
         val settings = ScenarioExplorerSettings.getInstance(project)
         settings.loadState(settings.state.copy(reportPath = path))

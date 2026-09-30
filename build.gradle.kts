@@ -44,6 +44,15 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <b>1.5.0</b><br>
+            <ul>
+                <li>"Enes Report" is now a real, persistent tool window (like Maven/Git) instead of an editor tab — closing/hiding the panel no longer loses a running pipeline or its Stop button</li>
+                <li>Pipeline: failed items can now automatically retry (configurable count) as soon as an idle parallel slot frees up, without waiting for the whole run to finish; already-run items always keep priority over retries</li>
+                <li>Duration shown for a single scenario or a chunk-of-one pipeline item now matches the real wall-clock time (Maven/JVM start-up included), instead of running a few seconds short</li>
+                <li>Removed the Steps tab</li>
+                <li>Report folder picker now starts from the project directory (or the currently set report path) instead of IntelliJ's own last-used-folder memory</li>
+                <li>Scenarios tree: pass/fail/not-run counts on folder and feature rows are now colored (green/red/gray); fixed their right-aligned duration column drifting out of line after the panel is resized</li>
+            </ul>
             <b>1.4.1</b><br>
             <ul>
                 <li>Pipeline detail page: the feature list on the left is now grouped by folder (like the Scenarios tab); selecting a folder selects all its features when adding scenarios</li>

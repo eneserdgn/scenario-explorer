@@ -42,7 +42,14 @@ class RunHandle {
 
 object ScenarioRunner {
 
+    /** Sidecar file extension holding a run's real wall-clock ms — see ReportReader. */
+    const val WALLTIME_EXTENSION = "walltime"
+
     private val batchSeq = java.util.concurrent.atomic.AtomicInteger()
+
+    private fun writeWallTime(reportDir: String, reportName: String, ms: Long) {
+        try { java.io.File(reportDir, "$reportName.$WALLTIME_EXTENSION").writeText(ms.toString()) } catch (_: Exception) {}
+    }
 
     fun run(
         project: Project, scenario: Scenario,
@@ -54,6 +61,7 @@ object ScenarioRunner {
         val safeName = sanitizeFileName(scenario.name)
         val reportName = "${safeName}_$timestamp"
         val reportDir = resolveReportDir(basePath, settings.reportPath)
+        val startTime = System.currentTimeMillis()
 
         val handle = RunHandle()
 
@@ -73,7 +81,14 @@ object ScenarioRunner {
             ScenarioType.CUCUMBER -> {
                 val tempTarget = createIsolatedTargetDir(basePath, "run")
                 val commandLine = buildCucumberCommand(basePath, scenario, reportName, settings.buildBeforeRun, tempTarget, reportDir)
-                execute(commandLine, onOutput, onFinished, tempTarget, handle)
+                // Cucumber's own per-step timings exclude Maven/JVM start-up — record the real
+                // wall-clock time too, so a single-scenario report can show the same total the
+                // user sees in the output/terminal (see ReportReader.WALLTIME_EXTENSION).
+                val timedOnFinished: (Int) -> Unit = { code ->
+                    writeWallTime(reportDir, reportName, System.currentTimeMillis() - startTime)
+                    onFinished(code)
+                }
+                execute(commandLine, onOutput, timedOnFinished, tempTarget, handle)
             }
             ScenarioType.GAUGE -> {
                 val commandLine = buildGaugeCommand(basePath, scenario, settings.buildBeforeRun)
@@ -93,6 +108,7 @@ object ScenarioRunner {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
         val batchName = "BatchRun_${timestamp}_${batchSeq.incrementAndGet()}"
         val reportDir = resolveReportDir(basePath, settings.reportPath)
+        val startTime = System.currentTimeMillis()
         val handle = RunHandle()
 
         val featureFiles = scenarios
@@ -126,8 +142,15 @@ object ScenarioRunner {
                     buildPluginParam(batchName, reportDir)
                 )
             }
+            // Record the real wall-clock time next to the report — see ReportReader: for a batch
+            // of exactly one scenario (the default pipeline chunk size) it replaces the per-step
+            // JSON sum, which excludes Maven/JVM start-up and always runs a few seconds short.
+            val timedOnFinished: (Int) -> Unit = { code ->
+                writeWallTime(reportDir, batchName, System.currentTimeMillis() - startTime)
+                onFinished(code)
+            }
             // Don't delete shared target — pipeline manages its lifecycle
-            execute(commandLine, onOutput, onFinished, if (isShared) null else targetDir, handle)
+            execute(commandLine, onOutput, timedOnFinished, if (isShared) null else targetDir, handle)
             return handle
         }
 
